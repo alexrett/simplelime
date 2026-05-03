@@ -2,7 +2,7 @@
 
 Scratch-first text editor for macOS. It keeps temporary notes alive across app restarts, opens normal text files, has line numbers, Markdown preview, syntax highlighting, search/replace, text transforms, and basic AI assistance through Agent Client Protocol.
 
-![SimpleLime](Resources/AppIconSource.png)
+![SimpleLime](screenshots/app.png)
 
 ## Why?
 

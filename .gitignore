@@ -1,0 +1,15 @@
+.DS_Store
+.build/
+.swiftpm/
+dist/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+*.app/
+*.dmg
+*.zip
+
+.env.local
+.codex/
+image.png

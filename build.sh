@@ -6,7 +6,7 @@ set -euo pipefail
 APP_NAME="SimpleLime"
 BUNDLE_ID="com.whitehappypony.SimpleLime"
 DISPLAY_NAME="SimpleLime"
-VERSION="0.1.0"
+VERSION="0.1.1"
 BUILD="1"
 MIN_OS="13.0"
 IDENTITY="${IDENTITY:-Developer ID Application: Alex Malikov (525W3628D2)}"

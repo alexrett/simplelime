@@ -19,7 +19,7 @@ struct AIChatPanelView: View {
                 emptyState
             }
         }
-        .frame(minWidth: 340, idealWidth: 390, maxWidth: 500)
+        .frame(minWidth: 260, idealWidth: 390, maxWidth: 500)
         .background(Color(nsColor: .textBackgroundColor))
     }
 

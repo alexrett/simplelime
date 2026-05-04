@@ -59,7 +59,7 @@ struct SimpleLimeApp: App {
     var body: some Scene {
         WindowGroup("SimpleLime") {
             ContentView(store: store)
-                .frame(minWidth: 980, minHeight: 640)
+                .frame(minWidth: 320, minHeight: 320)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                     store.persistNow()
                 }

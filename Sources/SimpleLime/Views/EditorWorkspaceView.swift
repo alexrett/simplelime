@@ -9,7 +9,7 @@ struct EditorWorkspaceView: View {
             if store.isAIPanelVisible {
                 HSplitView {
                     mainEditorContent
-                        .frame(minWidth: 480)
+                        .frame(minWidth: 180)
                     AIChatPanelView(store: store, buffer: buffer)
                 }
             } else {
@@ -26,9 +26,9 @@ struct EditorWorkspaceView: View {
             if store.isPreviewVisible, buffer.language.isMarkdown {
                 HSplitView {
                     editor
-                        .frame(minWidth: 360)
+                        .frame(minWidth: 180)
                     MarkdownPreviewView(text: buffer.text)
-                        .frame(minWidth: 320)
+                        .frame(minWidth: 200)
                 }
             } else {
                 editor

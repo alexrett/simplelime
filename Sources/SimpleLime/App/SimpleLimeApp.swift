@@ -37,6 +37,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Self.enqueueOpenURLs(urls)
     }
 
+    func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
+        false
+    }
+
     deinit {
         if let windowObserver {
             NotificationCenter.default.removeObserver(windowObserver)
@@ -96,7 +100,7 @@ struct SimpleLimeApp: App {
     @StateObject private var store = EditorStore()
 
     var body: some Scene {
-        WindowGroup("SimpleLime") {
+        Window("SimpleLime", id: "main") {
             ContentView(store: store)
                 .frame(minWidth: 320, minHeight: 320)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in

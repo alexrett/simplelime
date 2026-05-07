@@ -54,7 +54,7 @@ struct WindowChromeReader: NSViewRepresentable {
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
             window.styleMask.insert(.fullSizeContentView)
-            window.isMovableByWindowBackground = true
+            window.isMovableByWindowBackground = false
         }
 
         private func installObservers() {

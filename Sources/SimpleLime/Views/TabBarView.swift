@@ -9,9 +9,9 @@ struct TabBarView: View {
         HStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 0) {
-                    Color(nsColor: .windowBackgroundColor)
+                    WindowDragArea()
+                        .background(Color(nsColor: .windowBackgroundColor))
                         .frame(width: leadingInset)
-                        .allowsHitTesting(false)
                     Divider()
 
                     ForEach(store.buffers) { buffer in

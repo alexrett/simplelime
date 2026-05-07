@@ -240,7 +240,7 @@ final class WorkspaceStore: ObservableObject {
         window.tabbingMode = .disallowed
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.isMovableByWindowBackground = true
+        window.isMovableByWindowBackground = false
 
         let delegate = WindowDelegate { [weak self] in
             self?.handleManualWindowWillClose(groupID: groupID)

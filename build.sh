@@ -6,7 +6,7 @@ set -euo pipefail
 APP_NAME="SimpleLime"
 BUNDLE_ID="com.whitehappypony.SimpleLime"
 DISPLAY_NAME="SimpleLime"
-VERSION="0.1.1"
+VERSION="0.2.0"
 BUILD="1"
 MIN_OS="13.0"
 IDENTITY="${IDENTITY:-Developer ID Application: Alex Malikov (525W3628D2)}"
@@ -16,6 +16,7 @@ APP="${APP_NAME}.app"
 DMG="${APP_NAME}.dmg"
 BINARY=".build/apple/Products/Release/${APP_NAME}"
 ICON="Resources/AppIcon.icns"
+CLI="Resources/simplelime"
 
 step() {
     echo ""
@@ -38,6 +39,10 @@ app)
     mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
     cp "${BINARY}" "${APP}/Contents/MacOS/"
     [ -f "${ICON}" ] && cp "${ICON}" "${APP}/Contents/Resources/AppIcon.icns"
+    if [ -f "${CLI}" ]; then
+        cp "${CLI}" "${APP}/Contents/Resources/simplelime"
+        chmod +x "${APP}/Contents/Resources/simplelime"
+    fi
 
     cat > "${APP}/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -52,10 +57,34 @@ app)
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
     <key>CFBundleVersion</key><string>${BUILD}</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>Text Document</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.text</string>
+                <string>public.plain-text</string>
+                <string>public.source-code</string>
+                <string>public.json</string>
+                <string>public.xml</string>
+                <string>public.shell-script</string>
+                <string>net.daringfireball.markdown</string>
+            </array>
+        </dict>
+    </array>
     <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
     <key>LSMinimumSystemVersion</key><string>${MIN_OS}</string>
+    <key>LSSupportsOpeningDocumentsInPlace</key><true/>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_simplelime._tcp</string>
+    </array>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSHumanReadableCopyright</key><string>© 2026 Aleksei Malikov. MIT License.</string>
+    <key>NSLocalNetworkUsageDescription</key><string>SimpleLime uses the local network to find trusted devices and exchange notes between your Macs.</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict>
 </plist>

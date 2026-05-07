@@ -20,6 +20,13 @@ struct SimpleLimeCommands: Commands {
                 store.openFiles()
             }
             .keyboardShortcut("o", modifiers: [.command])
+
+            Divider()
+
+            Button("Network Devices") {
+                store.showNetworkPanel()
+            }
+            .keyboardShortcut("k", modifiers: [.command, .shift])
         }
 
         CommandGroup(replacing: .saveItem) {

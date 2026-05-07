@@ -1,7 +1,12 @@
 import AppKit
 import SwiftUI
 
+extension Notification.Name {
+    static let simpleLimeOpenURLs = Notification.Name("SimpleLimeOpenURLs")
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private static var pendingOpenURLs: [URL] = []
     private var windowObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -24,12 +29,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.windows.forEach(Self.configure)
             self?.removeSystemTabbingMenuItems()
         }
+
+        Self.enqueueOpenURLs(Self.fileURLsFromCommandLine())
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        Self.enqueueOpenURLs(urls)
     }
 
     deinit {
         if let windowObserver {
             NotificationCenter.default.removeObserver(windowObserver)
         }
+    }
+
+    static func drainPendingOpenURLs() -> [URL] {
+        let urls = pendingOpenURLs
+        pendingOpenURLs.removeAll()
+        return urls
     }
 
     private static func configure(_ window: NSWindow) {
@@ -47,6 +64,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         viewMenu.items.removeAll { item in
             item.title == "Show Tab Bar" || item.title == "Show All Tabs"
+        }
+    }
+
+    private static func enqueueOpenURLs(_ urls: [URL]) {
+        let fileURLs = urls.filter { $0.isFileURL }
+        guard !fileURLs.isEmpty else { return }
+
+        pendingOpenURLs.append(contentsOf: fileURLs)
+        NotificationCenter.default.post(
+            name: .simpleLimeOpenURLs,
+            object: nil,
+            userInfo: ["urls": fileURLs]
+        )
+    }
+
+    private static func fileURLsFromCommandLine() -> [URL] {
+        CommandLine.arguments.dropFirst().compactMap { argument in
+            guard !argument.hasPrefix("-") else { return nil }
+
+            let expanded = (argument as NSString).expandingTildeInPath
+            let url = URL(fileURLWithPath: expanded)
+            return FileManager.default.fileExists(atPath: url.path) ? url : nil
         }
     }
 }

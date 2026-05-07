@@ -14,8 +14,11 @@ final class EditorStore: ObservableObject {
     @Published var lastError: String?
     @Published var pendingCloseBuffer: EditorBuffer?
     @Published var isAIPanelVisible = false
+    @Published var isNetworkPanelVisible = false
     @Published var aiRunningSessions = Set<UUID>()
     @Published var aiSessionStatuses: [UUID: String] = [:]
+
+    let networkShare: NetworkShareService
 
     private let persistence: SessionPersistence
     private let aiFileBridge = AIBufferFileBridge()
@@ -27,6 +30,7 @@ final class EditorStore: ObservableObject {
 
     init(persistence: SessionPersistence = SessionPersistence()) {
         self.persistence = persistence
+        networkShare = NetworkShareService()
         let loaded = persistence.load()
 
         if loaded.buffers.isEmpty {
@@ -38,6 +42,9 @@ final class EditorStore: ObservableObject {
             selectedBufferID = loaded.selectedID ?? loaded.buffers.first?.id
         }
 
+        networkShare.onReceivedNote = { [weak self] note in
+            self?.importSharedNote(note)
+        }
         persistSoon()
     }
 
@@ -80,6 +87,14 @@ final class EditorStore: ObservableObject {
 
     func showAIPanel() {
         isAIPanelVisible = true
+    }
+
+    func toggleNetworkPanel() {
+        isNetworkPanelVisible.toggle()
+    }
+
+    func showNetworkPanel() {
+        isNetworkPanelVisible = true
     }
 
     func selectedAIChatSession(in bufferID: UUID) -> AIChatSession? {
@@ -288,6 +303,12 @@ final class EditorStore: ObservableObject {
         }
     }
 
+    func openFiles(at urls: [URL]) {
+        for url in urls {
+            openFile(at: url)
+        }
+    }
+
     func openFile(at url: URL) {
         if let existing = buffers.first(where: { $0.filePath == url.path }) {
             selectedBufferID = existing.id
@@ -317,6 +338,70 @@ final class EditorStore: ObservableObject {
         } catch {
             lastError = "Could not open \(url.lastPathComponent): \(error.localizedDescription)"
         }
+    }
+
+    func pairNetworkPeer(_ deviceID: String) {
+        networkShare.pair(with: deviceID)
+    }
+
+    func sendSelectedBuffer(to deviceID: String) {
+        guard let selectedBuffer else {
+            return
+        }
+
+        let note = SharedNotePayload(
+            id: UUID(),
+            title: selectedBuffer.displayTitle,
+            text: selectedBuffer.text,
+            language: selectedBuffer.language,
+            sentAt: Date(),
+            sourceDeviceID: networkShare.localDeviceID,
+            sourceDeviceName: networkShare.localDisplayName,
+            sourceToken: nil
+        )
+        networkShare.send(note: note, to: deviceID)
+    }
+
+    func removeTrustedNetworkDevice(_ deviceID: String) {
+        networkShare.removeTrustedDevice(deviceID)
+    }
+
+    private func importSharedNote(_ note: SharedNotePayload) {
+        let now = Date()
+        let baseTitle = note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Shared Note"
+            : note.title
+        let buffer = EditorBuffer(
+            id: UUID(),
+            title: uniqueSharedTitle(baseTitle),
+            kind: .scratch,
+            filePath: nil,
+            text: note.text,
+            language: note.language,
+            createdAt: now,
+            updatedAt: now,
+            isDirty: !note.text.isEmpty,
+            selectionRanges: [.zero],
+            aiSessions: [],
+            selectedAIChatSessionID: nil
+        )
+
+        buffers.append(buffer)
+        selectedBufferID = buffer.id
+        persistSoon()
+    }
+
+    private func uniqueSharedTitle(_ title: String) -> String {
+        guard buffers.contains(where: { $0.title == title }) else {
+            return title
+        }
+
+        var index = 2
+        while buffers.contains(where: { $0.title == "\(title) \(index)" }) {
+            index += 1
+        }
+
+        return "\(title) \(index)"
     }
 
     func saveSelected() {

@@ -5,7 +5,7 @@ MODE="${1:-run}"
 APP_NAME="SimpleLime"
 BUNDLE_ID="com.whitehappypony.SimpleLime"
 MIN_SYSTEM_VERSION="13.0"
-APP_VERSION="0.1.1"
+APP_VERSION="0.2.0"
 APP_BUILD="1"
 APP_DESCRIPTION="Scratch-first text editor for temporary notes, Markdown, and code."
 
@@ -18,6 +18,7 @@ APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 APP_ICON="$ROOT_DIR/Resources/AppIcon.icns"
+APP_CLI="$ROOT_DIR/Resources/simplelime"
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
@@ -31,6 +32,11 @@ chmod +x "$APP_BINARY"
 
 if [[ -f "$APP_ICON" ]]; then
   cp "$APP_ICON" "$APP_RESOURCES/AppIcon.icns"
+fi
+
+if [[ -f "$APP_CLI" ]]; then
+  cp "$APP_CLI" "$APP_RESOURCES/simplelime"
+  chmod +x "$APP_RESOURCES/simplelime"
 fi
 
 cat >"$INFO_PLIST" <<PLIST
@@ -50,16 +56,45 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
   <string>$APP_BUILD</string>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Text Document</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.text</string>
+        <string>public.plain-text</string>
+        <string>public.source-code</string>
+        <string>public.json</string>
+        <string>public.xml</string>
+        <string>public.shell-script</string>
+        <string>net.daringfireball.markdown</string>
+      </array>
+    </dict>
+  </array>
   <key>CFBundleGetInfoString</key>
   <string>$APP_NAME $APP_VERSION - $APP_DESCRIPTION</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.productivity</string>
+  <key>LSSupportsOpeningDocumentsInPlace</key>
+  <true/>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_simplelime._tcp</string>
+  </array>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>SimpleLime uses the local network to find trusted devices and exchange notes between your Macs.</string>
   <key>NSHumanReadableCopyright</key>
   <string>$APP_DESCRIPTION</string>
   <key>NSPrincipalClass</key>

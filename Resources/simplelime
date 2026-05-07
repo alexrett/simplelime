@@ -1,0 +1,17 @@
+#!/bin/zsh
+set -e
+
+APP_BUNDLE="$(cd "$(dirname "$0")/../.." && pwd)"
+
+case "${1:-}" in
+  -h|--help)
+    echo "usage: simplelime [file ...]"
+    exit 0
+    ;;
+esac
+
+if [[ $# -eq 0 ]]; then
+  exec /usr/bin/open -a "$APP_BUNDLE"
+fi
+
+exec /usr/bin/open -a "$APP_BUNDLE" -- "$@"

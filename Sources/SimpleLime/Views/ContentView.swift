@@ -3,8 +3,14 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var store: EditorStore
+    @ObservedObject private var network: NetworkShareService
     @StateObject private var chromeState = WindowChromeState()
     @State private var keyMonitor: Any?
+
+    init(store: EditorStore) {
+        self.store = store
+        _network = ObservedObject(wrappedValue: store.networkShare)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,9 +24,7 @@ struct ContentView: View {
             }
 
             if let buffer = store.selectedBuffer {
-                EditorWorkspaceView(store: store, buffer: buffer)
-                    .id(buffer.id)
-                    .clipped()
+                workspace(buffer: buffer)
                     .zIndex(0)
             } else {
                 VStack(spacing: 10) {
@@ -36,6 +40,15 @@ struct ContentView: View {
         }
         .onAppear {
             installKeyMonitor()
+            openPendingLaunchURLs()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .simpleLimeOpenURLs)) { notification in
+            guard let urls = notification.userInfo?["urls"] as? [URL] else {
+                return
+            }
+
+            store.openFiles(at: urls)
+            _ = AppDelegate.drainPendingOpenURLs()
         }
         .onDisappear {
             removeKeyMonitor()
@@ -80,10 +93,55 @@ struct ContentView: View {
         } message: {
             Text("“\(store.pendingCloseBuffer?.displayTitle ?? "Untitled")” contains text. Closing it removes this tab from the restored session.")
         }
+        .alert(
+            "Trust Device?",
+            isPresented: Binding(
+                get: { network.pendingPairRequest != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        network.rejectPendingPair()
+                    }
+                }
+            )
+        ) {
+            Button("Cancel", role: .cancel) {
+                network.rejectPendingPair()
+            }
+            Button("Trust") {
+                network.acceptPendingPair()
+                store.showNetworkPanel()
+            }
+        } message: {
+            Text("Allow \(network.pendingPairRequest?.name ?? "this Mac") to exchange SimpleLime notes with this device.")
+        }
     }
 
     private var ignoredSafeAreaEdges: Edge.Set {
         chromeState.isFullScreen ? [] : .top
+    }
+
+    @ViewBuilder
+    private func workspace(buffer: EditorBuffer) -> some View {
+        if store.isNetworkPanelVisible {
+            HSplitView {
+                EditorWorkspaceView(store: store, buffer: buffer)
+                    .id(buffer.id)
+                    .clipped()
+                    .frame(minWidth: 220)
+                NetworkSharePanelView(store: store)
+            }
+            .clipped()
+        } else {
+            EditorWorkspaceView(store: store, buffer: buffer)
+                .id(buffer.id)
+                .clipped()
+        }
+    }
+
+    private func openPendingLaunchURLs() {
+        let urls = AppDelegate.drainPendingOpenURLs()
+        guard !urls.isEmpty else { return }
+        store.openFiles(at: urls)
     }
 
     private func installKeyMonitor() {
@@ -125,6 +183,9 @@ struct ContentView: View {
         switch event.keyCode {
         case 34 where flags.contains(.shift):
             store.toggleAIPanel()
+            return nil
+        case 40 where flags.contains(.shift):
+            store.showNetworkPanel()
             return nil
         case 3 where flags.contains(.shift):
             store.showGlobalFind()

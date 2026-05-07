@@ -25,6 +25,9 @@ SimpleLime is not trying to replace a full IDE. It is a fast working notebook wi
 - Font size controls
 - AI chat per tab with multiple sessions
 - ACP integration for Copilot and configurable Codex-compatible agents
+- Local network device sharing with trusted SimpleLime peers
+- Finder Open With support for text files
+- `simplelime` command-line launcher when installed through Homebrew
 
 ## Shortcuts
 
@@ -44,6 +47,7 @@ SimpleLime is not trying to replace a full IDE. It is a fast working notebook wi
 | `⌘+` / `⌘-` | Increase / decrease font size |
 | `⌘⇧P` | Toggle Markdown preview |
 | `⌘⇧I` | Toggle AI panel |
+| `⌘⇧K` | Show network devices |
 
 ## AI
 
@@ -61,6 +65,12 @@ Codex is configurable in Settings. The default command is `codex-acp`, so it wil
 
 ```bash
 brew install --cask alexrett/tap/simplelime
+```
+
+Open files from the terminal:
+
+```bash
+simplelime notes.md
 ```
 
 ### Download

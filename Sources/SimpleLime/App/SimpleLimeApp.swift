@@ -97,26 +97,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct SimpleLimeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var store = EditorStore()
+    @StateObject private var workspace = WorkspaceStore()
 
     var body: some Scene {
         Window("SimpleLime", id: "main") {
-            ContentView(store: store)
+            WorkspaceRootView(workspace: workspace)
                 .frame(minWidth: 320, minHeight: 320)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-                    store.persistNow()
+                    workspace.prepareForTermination()
+                    workspace.persistNow()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
-                    store.persistNow()
+                    workspace.persistNow()
                 }
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
-            SimpleLimeCommands(store: store)
+            SimpleLimeCommands(workspace: workspace)
         }
 
         Settings {
-            SettingsView(store: store)
+            SettingsView(workspace: workspace)
+        }
+    }
+}
+
+private struct WorkspaceRootView: View {
+    @ObservedObject var workspace: WorkspaceStore
+
+    var body: some View {
+        if let store = workspace.store(for: workspace.primaryGroupID) {
+            ContentView(store: store) {
+                workspace.activate(workspace.primaryGroupID)
+            }
+        } else {
+            ProgressView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }

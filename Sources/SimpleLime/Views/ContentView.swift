@@ -6,9 +6,11 @@ struct ContentView: View {
     @ObservedObject private var network: NetworkShareService
     @StateObject private var chromeState = WindowChromeState()
     @State private var keyMonitor: Any?
+    private let onActivate: () -> Void
 
-    init(store: EditorStore) {
+    init(store: EditorStore, onActivate: @escaping () -> Void = {}) {
         self.store = store
+        self.onActivate = onActivate
         _network = ObservedObject(wrappedValue: store.networkShare)
     }
 
@@ -39,22 +41,14 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            onActivate()
             installKeyMonitor()
-            openPendingLaunchURLs()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .simpleLimeOpenURLs)) { notification in
-            guard let urls = notification.userInfo?["urls"] as? [URL] else {
-                return
-            }
-
-            store.openFiles(at: urls)
-            _ = AppDelegate.drainPendingOpenURLs()
         }
         .onDisappear {
             removeKeyMonitor()
         }
         .background(Color(nsColor: .textBackgroundColor))
-        .background(WindowChromeReader(state: chromeState).frame(width: 0, height: 0))
+        .background(WindowChromeReader(state: chromeState, onBecomeMain: onActivate).frame(width: 0, height: 0))
         .ignoresSafeArea(.container, edges: ignoredSafeAreaEdges)
         .alert(
             "SimpleLime",
@@ -136,12 +130,6 @@ struct ContentView: View {
                 .id(buffer.id)
                 .clipped()
         }
-    }
-
-    private func openPendingLaunchURLs() {
-        let urls = AppDelegate.drainPendingOpenURLs()
-        guard !urls.isEmpty else { return }
-        store.openFiles(at: urls)
     }
 
     private func installKeyMonitor() {

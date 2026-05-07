@@ -26,6 +26,8 @@ SimpleLime is not trying to replace a full IDE. It is a fast working notebook wi
 - AI chat per tab with multiple sessions
 - ACP integration for Copilot and configurable Codex-compatible agents
 - Local network device sharing with trusted SimpleLime peers
+- Independent window tab groups
+- Move tabs between windows or open a copy of the current tab in a new window
 - Finder Open With support for text files
 - `simplelime` command-line launcher when installed through Homebrew
 
@@ -34,6 +36,8 @@ SimpleLime is not trying to replace a full IDE. It is a fast working notebook wi
 | Shortcut | Action |
 | --- | --- |
 | `⌘N` | New scratch buffer |
+| `⌘⇧N` | New window |
+| `⌘⌥N` | Move current tab to new window |
 | `⌘O` | Open file |
 | `⌘S` | Save |
 | `⌘W` | Close tab |

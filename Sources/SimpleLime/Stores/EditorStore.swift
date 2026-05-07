@@ -18,9 +18,12 @@ final class EditorStore: ObservableObject {
     @Published var aiRunningSessions = Set<UUID>()
     @Published var aiSessionStatuses: [UUID: String] = [:]
 
+    let windowGroupID: UUID
     let networkShare: NetworkShareService
+    var onPersistRequested: (() -> Void)?
+    var onMoveTabBetweenGroups: ((_ sourceGroupID: UUID, _ targetGroupID: UUID, _ bufferID: UUID) -> Void)?
 
-    private let persistence: SessionPersistence
+    private let persistence: SessionPersistence?
     private let aiFileBridge = AIBufferFileBridge()
     private var pendingSaveTask: Task<Void, Never>?
     private var editorCommandHandler: ((EditorCommand) -> Bool)?
@@ -28,10 +31,25 @@ final class EditorStore: ObservableObject {
     private var aiChatIDsByAgentSession: [String: UUID] = [:]
     private var aiStreamingMessageIDs: [UUID: UUID] = [:]
 
-    init(persistence: SessionPersistence = SessionPersistence()) {
+    init(
+        windowGroupID: UUID = UUID(),
+        initialBuffers: [EditorBuffer]? = nil,
+        selectedID: UUID? = nil,
+        persistence: SessionPersistence? = SessionPersistence(),
+        networkShare: NetworkShareService = NetworkShareService(),
+        autoPersistOnInit: Bool = true,
+        registerNetworkReceiver: Bool = true
+    ) {
+        self.windowGroupID = windowGroupID
         self.persistence = persistence
-        networkShare = NetworkShareService()
-        let loaded = persistence.load()
+        self.networkShare = networkShare
+        let loaded: (buffers: [EditorBuffer], selectedID: UUID?)
+
+        if let initialBuffers {
+            loaded = (initialBuffers, selectedID)
+        } else {
+            loaded = persistence?.load() ?? ([], nil)
+        }
 
         if loaded.buffers.isEmpty {
             let initial = EditorBuffer.scratch(index: 1)
@@ -42,10 +60,15 @@ final class EditorStore: ObservableObject {
             selectedBufferID = loaded.selectedID ?? loaded.buffers.first?.id
         }
 
-        networkShare.onReceivedNote = { [weak self] note in
-            self?.importSharedNote(note)
+        if registerNetworkReceiver {
+            networkShare.onReceivedNote = { [weak self] note in
+                self?.importSharedNote(note)
+            }
         }
-        persistSoon()
+
+        if autoPersistOnInit {
+            persistSoon()
+        }
     }
 
     deinit {
@@ -222,6 +245,58 @@ final class EditorStore: ObservableObject {
         forceCloseBuffer(id: id)
     }
 
+    func detachSelectedBufferForNewWindow() -> EditorBuffer? {
+        guard let selectedBufferID else { return nil }
+        return detachBuffer(id: selectedBufferID)
+    }
+
+    func copySelectedBufferForNewWindow() -> EditorBuffer? {
+        guard var buffer = selectedBuffer else { return nil }
+        let now = Date()
+        buffer.id = UUID()
+        buffer.createdAt = now
+        buffer.updatedAt = now
+        buffer.aiSessions = []
+        buffer.selectedAIChatSessionID = nil
+        return buffer
+    }
+
+    func detachBuffer(id: UUID) -> EditorBuffer? {
+        guard let index = buffers.firstIndex(where: { $0.id == id }) else { return nil }
+        let buffer = buffers[index]
+        stopAIClients(for: buffer)
+        let wasSelected = selectedBufferID == id
+        buffers.remove(at: index)
+
+        if buffers.isEmpty {
+            let replacement = EditorBuffer.scratch(index: 1)
+            buffers = [replacement]
+            selectedBufferID = replacement.id
+        } else if wasSelected {
+            let nextIndex = min(index, buffers.count - 1)
+            selectedBufferID = buffers[nextIndex].id
+        }
+
+        persistSoon()
+        return buffer
+    }
+
+    func appendMovedBuffer(_ buffer: EditorBuffer) {
+        if buffers.count == 1, let only = buffers.first, only.kind == .scratch, only.text.isEmpty, !only.isDirty {
+            buffers = [buffer]
+        } else {
+            buffers.append(buffer)
+        }
+
+        selectedBufferID = buffer.id
+        persistSoon()
+    }
+
+    func moveTabFromGroup(_ sourceGroupID: UUID, bufferID: UUID) {
+        guard sourceGroupID != windowGroupID else { return }
+        onMoveTabBetweenGroups?(sourceGroupID, windowGroupID, bufferID)
+    }
+
     func confirmPendingClose() {
         guard let pendingCloseBuffer else { return }
         let id = pendingCloseBuffer.id
@@ -366,7 +441,7 @@ final class EditorStore: ObservableObject {
         networkShare.removeTrustedDevice(deviceID)
     }
 
-    private func importSharedNote(_ note: SharedNotePayload) {
+    func importSharedNote(_ note: SharedNotePayload) {
         let now = Date()
         let baseTitle = note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "Shared Note"
@@ -429,6 +504,13 @@ final class EditorStore: ObservableObject {
     func persistNow() {
         pendingSaveTask?.cancel()
         pendingSaveTask = nil
+
+        if let onPersistRequested {
+            onPersistRequested()
+            return
+        }
+
+        guard let persistence else { return }
 
         do {
             try persistence.save(buffers: buffers, selectedID: selectedBufferID)
@@ -924,6 +1006,16 @@ final class EditorStore: ObservableObject {
         }
 
         return nil
+    }
+
+    private func stopAIClients(for buffer: EditorBuffer) {
+        for session in buffer.aiSessions {
+            aiClients.removeValue(forKey: session.id)?.stop()
+            aiRunningSessions.remove(session.id)
+            aiSessionStatuses.removeValue(forKey: session.id)
+            aiStreamingMessageIDs.removeValue(forKey: session.id)
+            aiChatIDsByAgentSession = aiChatIDsByAgentSession.filter { $0.value != session.id }
+        }
     }
 
     private func saveBuffer(at index: Int, to url: URL) {

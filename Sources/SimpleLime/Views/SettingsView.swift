@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @ObservedObject var store: EditorStore
+    @ObservedObject var workspace: WorkspaceStore
     @AppStorage("ai.copilot.executable") private var copilotExecutable = AIAgentProvider.copilot.defaultExecutable
     @AppStorage("ai.copilot.arguments") private var copilotArguments = AIAgentProvider.copilot.defaultArguments
     @AppStorage("ai.codex.executable") private var codexExecutable = AIAgentProvider.codex.defaultExecutable
@@ -13,8 +13,8 @@ struct SettingsView: View {
                 HStack {
                     Text("Editor Font Size")
                     Spacer()
-                    Stepper(value: $store.fontSize, in: 10...28, step: 1) {
-                        Text("\(Int(store.fontSize)) pt")
+                    Stepper(value: fontSizeBinding, in: 10...28, step: 1) {
+                        Text("\(Int(activeStore.fontSize)) pt")
                             .monospacedDigit()
                             .frame(width: 54, alignment: .trailing)
                     }
@@ -39,6 +39,17 @@ struct SettingsView: View {
         }
         .padding(20)
         .frame(width: 520)
+    }
+
+    private var activeStore: EditorStore {
+        workspace.activeStore ?? workspace.store(for: workspace.primaryGroupID)!
+    }
+
+    private var fontSizeBinding: Binding<Double> {
+        Binding(
+            get: { activeStore.fontSize },
+            set: { activeStore.fontSize = $0 }
+        )
     }
 
     private func agentSettings(title: String, executable: Binding<String>, arguments: Binding<String>) -> some View {

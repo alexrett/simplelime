@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct TabBarView: View {
     @ObservedObject var store: EditorStore
@@ -17,6 +18,7 @@ struct TabBarView: View {
                         TabItemView(
                             buffer: buffer,
                             isSelected: buffer.id == store.selectedBufferID,
+                            dragPayload: Self.tabDragPayload(groupID: store.windowGroupID, bufferID: buffer.id),
                             select: { store.select(buffer.id) },
                             close: { store.closeBuffer(id: buffer.id) }
                         )
@@ -40,16 +42,53 @@ struct TabBarView: View {
         .overlay(alignment: .bottom) {
             Divider()
         }
+        .onDrop(of: [.plainText], isTargeted: nil, perform: handleTabDrop)
     }
 
     private var leadingInset: CGFloat {
         isFullScreen ? 0 : 80
+    }
+
+    private static func tabDragPayload(groupID: UUID, bufferID: UUID) -> String {
+        "simplelime-tab:\(groupID.uuidString):\(bufferID.uuidString)"
+    }
+
+    private func handleTabDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else {
+            return false
+        }
+
+        provider.loadObject(ofClass: NSString.self) { object, _ in
+            guard let payload = object as? String,
+                  let parsed = parseTabDragPayload(payload) else {
+                return
+            }
+
+            DispatchQueue.main.async {
+                store.moveTabFromGroup(parsed.groupID, bufferID: parsed.bufferID)
+            }
+        }
+
+        return true
+    }
+
+    private func parseTabDragPayload(_ payload: String) -> (groupID: UUID, bufferID: UUID)? {
+        let parts = payload.split(separator: ":").map(String.init)
+        guard parts.count == 3,
+              parts[0] == "simplelime-tab",
+              let groupID = UUID(uuidString: parts[1]),
+              let bufferID = UUID(uuidString: parts[2]) else {
+            return nil
+        }
+
+        return (groupID, bufferID)
     }
 }
 
 private struct TabItemView: View {
     let buffer: EditorBuffer
     let isSelected: Bool
+    let dragPayload: String
     let select: () -> Void
     let close: () -> Void
 
@@ -82,6 +121,9 @@ private struct TabItemView: View {
         .frame(height: 38)
         .contentShape(Rectangle())
         .onTapGesture(perform: select)
+        .onDrag {
+            NSItemProvider(object: dragPayload as NSString)
+        }
         .overlay(alignment: .top) {
             if isSelected {
                 Color(nsColor: .controlAccentColor)

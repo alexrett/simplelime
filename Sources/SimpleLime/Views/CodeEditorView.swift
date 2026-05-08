@@ -70,6 +70,7 @@ struct CodeEditorView: NSViewRepresentable {
 
         if textView.string != text {
             textView.string = text
+            (textView as? EditorTextView)?.needsSyntaxHighlight = true
         }
 
         (textView as? EditorTextView)?.shortcutHandler = { shortcut in
@@ -79,7 +80,7 @@ struct CodeEditorView: NSViewRepresentable {
         if let textView = textView as? EditorTextView {
             registerCommandHandler(for: textView)
         }
-        SyntaxHighlighter.apply(to: textView, language: language, fontSize: fontSize)
+        applySyntaxHighlighting(to: textView, language: language, fontSize: CGFloat(fontSize))
         (scrollView.verticalRulerView as? LineNumberRulerView)?.invalidateLineNumbers()
         applySelection(selectionRanges, to: textView)
         applyCurrentLineHighlight(to: textView)
@@ -113,6 +114,24 @@ struct CodeEditorView: NSViewRepresentable {
         textView.needsDisplay = true
     }
 
+    private func applySyntaxHighlighting(to textView: NSTextView, language: EditorLanguage, fontSize: CGFloat) {
+        guard let editorTextView = textView as? EditorTextView else {
+            SyntaxHighlighter.apply(to: textView, language: language, fontSize: fontSize)
+            return
+        }
+
+        guard editorTextView.needsSyntaxHighlight ||
+            editorTextView.highlightedLanguage != language ||
+            editorTextView.highlightedFontSize != fontSize else {
+            return
+        }
+
+        SyntaxHighlighter.apply(to: textView, language: language, fontSize: fontSize)
+        editorTextView.needsSyntaxHighlight = false
+        editorTextView.highlightedLanguage = language
+        editorTextView.highlightedFontSize = fontSize
+    }
+
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: CodeEditorView
         var isApplyingExternalUpdate = false
@@ -129,7 +148,8 @@ struct CodeEditorView: NSViewRepresentable {
 
             parent.text = textView.string
             parent.selectionRanges = textView.selectedRanges.map { TextRange($0.rangeValue) }
-            SyntaxHighlighter.apply(to: textView, language: parent.language, fontSize: parent.fontSize)
+            (textView as? EditorTextView)?.needsSyntaxHighlight = true
+            parent.applySyntaxHighlighting(to: textView, language: parent.language, fontSize: CGFloat(parent.fontSize))
             parent.applyCurrentLineHighlight(to: textView)
             (textView.enclosingScrollView?.verticalRulerView as? LineNumberRulerView)?.invalidateLineNumbers()
         }
@@ -141,7 +161,6 @@ struct CodeEditorView: NSViewRepresentable {
             }
 
             parent.selectionRanges = textView.selectedRanges.map { TextRange($0.rangeValue) }
-            SyntaxHighlighter.apply(to: textView, language: parent.language, fontSize: parent.fontSize)
             parent.applyCurrentLineHighlight(to: textView)
             (textView.enclosingScrollView?.verticalRulerView as? LineNumberRulerView)?.invalidateLineNumbers()
         }
@@ -150,6 +169,9 @@ struct CodeEditorView: NSViewRepresentable {
 
 final class EditorTextView: NSTextView {
     var shortcutHandler: ((EditorShortcut) -> Bool)?
+    var needsSyntaxHighlight = true
+    var highlightedLanguage: EditorLanguage?
+    var highlightedFontSize: CGFloat?
 
     override var acceptsFirstResponder: Bool {
         true
@@ -202,6 +224,8 @@ final class EditorTextView: NSTextView {
             shortcut = .transform(.duplicateLine)
         case 37 where flags.contains(.shift):
             shortcut = .selectAllMatches
+        case 5 where flags.contains(.option):
+            shortcut = .addNextOccurrence
         case 32 where flags.contains(.option) && flags.contains(.shift):
             shortcut = .transform(.uniqueLines)
         case 32 where flags.contains(.shift):
@@ -229,6 +253,69 @@ final class EditorTextView: NSTextView {
         }
 
         return super.performKeyEquivalent(with: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags.contains(.option),
+              !flags.contains(.command),
+              let location = insertionLocation(for: convert(event.locationInWindow, from: nil)) else {
+            super.mouseDown(with: event)
+            return
+        }
+
+        var ranges = selectedRanges.map(\.rangeValue)
+        ranges.append(NSRange(location: location, length: 0))
+        selectedRanges = normalizedSelectionValues(ranges)
+    }
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        guard shouldApplyMultiCursorEdit else {
+            super.insertText(insertString, replacementRange: replacementRange)
+            return
+        }
+
+        let replacement: String
+        if let attributed = insertString as? NSAttributedString {
+            replacement = attributed.string
+        } else {
+            replacement = "\(insertString)"
+        }
+
+        let ranges = selectedRanges.map(\.rangeValue)
+        _ = replaceForTyping(ranges: ranges, replacement: replacement)
+    }
+
+    override func insertNewline(_ sender: Any?) {
+        guard shouldApplyMultiCursorEdit else {
+            super.insertNewline(sender)
+            return
+        }
+
+        let ranges = selectedRanges.map(\.rangeValue)
+        _ = replaceForTyping(ranges: ranges, replacement: "\n")
+    }
+
+    override func deleteBackward(_ sender: Any?) {
+        guard shouldApplyMultiCursorEdit else {
+            super.deleteBackward(sender)
+            return
+        }
+
+        let ranges = deletionRanges(backward: true)
+        guard !ranges.isEmpty else { return }
+        _ = replaceForTyping(ranges: ranges, replacement: "")
+    }
+
+    override func deleteForward(_ sender: Any?) {
+        guard shouldApplyMultiCursorEdit else {
+            super.deleteForward(sender)
+            return
+        }
+
+        let ranges = deletionRanges(backward: false)
+        guard !ranges.isEmpty else { return }
+        _ = replaceForTyping(ranges: ranges, replacement: "")
     }
 
     override func keyDown(with event: NSEvent) {
@@ -354,6 +441,98 @@ final class EditorTextView: NSTextView {
 
         selectedRanges = newSelections.reversed()
         return true
+    }
+
+    private func replaceForTyping(ranges: [NSRange], replacement: String) -> Bool {
+        guard !ranges.isEmpty else { return false }
+
+        let sorted = normalizedRanges(ranges).sorted { lhs, rhs in
+            lhs.location > rhs.location
+        }
+
+        undoManager?.beginUndoGrouping()
+        defer { undoManager?.endUndoGrouping() }
+
+        var newSelections: [NSValue] = []
+        for range in sorted {
+            guard shouldChangeText(in: range, replacementString: replacement) else { continue }
+            textStorage?.replaceCharacters(in: range, with: replacement)
+            didChangeText()
+            newSelections.append(
+                NSValue(range: NSRange(location: range.location + replacement.utf16.count, length: 0))
+            )
+        }
+
+        selectedRanges = newSelections.reversed()
+        return true
+    }
+
+    private var shouldApplyMultiCursorEdit: Bool {
+        selectedRanges.count > 1
+    }
+
+    private func deletionRanges(backward: Bool) -> [NSRange] {
+        let nsText = string as NSString
+        return normalizedRanges(selectedRanges.map(\.rangeValue)).compactMap { range in
+            if range.length > 0 {
+                return range
+            }
+
+            if backward {
+                guard range.location > 0 else { return nil }
+                return nsText.rangeOfComposedCharacterSequence(at: range.location - 1)
+            }
+
+            guard range.location < nsText.length else { return nil }
+            return nsText.rangeOfComposedCharacterSequence(at: range.location)
+        }
+    }
+
+    private func insertionLocation(for point: NSPoint) -> Int? {
+        guard let layoutManager,
+              let textContainer else {
+            return nil
+        }
+
+        let nsText = string as NSString
+        guard nsText.length > 0 else { return 0 }
+
+        let containerPoint = NSPoint(
+            x: point.x - textContainerOrigin.x,
+            y: point.y - textContainerOrigin.y
+        )
+        layoutManager.ensureLayout(for: textContainer)
+
+        var fraction: CGFloat = 0
+        let glyphIndex = layoutManager.glyphIndex(
+            for: containerPoint,
+            in: textContainer,
+            fractionOfDistanceThroughGlyph: &fraction
+        )
+        var characterIndex = layoutManager.characterIndexForGlyph(at: glyphIndex)
+        if fraction > 0.5, characterIndex < nsText.length {
+            characterIndex += 1
+        }
+
+        return min(max(0, characterIndex), nsText.length)
+    }
+
+    private func normalizedSelectionValues(_ ranges: [NSRange]) -> [NSValue] {
+        normalizedRanges(ranges).map(NSValue.init(range:))
+    }
+
+    private func normalizedRanges(_ ranges: [NSRange]) -> [NSRange] {
+        let textLength = (string as NSString).length
+        var seen = Set<String>()
+
+        return ranges.compactMap { range -> NSRange? in
+            let location = min(max(0, range.location), textLength)
+            let length = min(max(0, range.length), textLength - location)
+            let key = "\(location):\(length)"
+            guard seen.insert(key).inserted else { return nil }
+            return NSRange(location: location, length: length)
+        }
+        .sorted { $0.location < $1.location }
     }
 
     private func nonEmptySelectedRanges() -> [NSRange] {

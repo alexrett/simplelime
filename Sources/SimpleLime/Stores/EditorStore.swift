@@ -30,6 +30,7 @@ final class EditorStore: ObservableObject {
     private var aiClients: [UUID: ACPAgentClient] = [:]
     private var aiChatIDsByAgentSession: [String: UUID] = [:]
     private var aiStreamingMessageIDs: [UUID: UUID] = [:]
+    private var pendingFileLoadIDs = Set<UUID>()
 
     init(
         windowGroupID: UUID = UUID(),
@@ -390,29 +391,70 @@ final class EditorStore: ObservableObject {
             return
         }
 
-        do {
-            var encoding = String.Encoding.utf8
-            let text = try String(contentsOf: url, usedEncoding: &encoding)
-            let now = Date()
-            let buffer = EditorBuffer(
-                id: UUID(),
-                title: url.lastPathComponent,
-                kind: .file,
-                filePath: url.path,
-                text: text,
-                language: EditorLanguage.detect(fileName: url.lastPathComponent, text: text),
-                createdAt: now,
-                updatedAt: now,
-                isDirty: false,
-                selectionRanges: [.zero]
-            )
+        let now = Date()
+        let bufferID = UUID()
+        let buffer = EditorBuffer(
+            id: bufferID,
+            title: url.lastPathComponent,
+            kind: .file,
+            filePath: url.path,
+            text: "",
+            language: EditorLanguage.detect(fileName: url.lastPathComponent, text: ""),
+            createdAt: now,
+            updatedAt: now,
+            isDirty: false,
+            selectionRanges: [.zero]
+        )
 
-            buffers.append(buffer)
-            selectedBufferID = buffer.id
-            persistSoon()
-        } catch {
+        buffers.append(buffer)
+        selectedBufferID = buffer.id
+        pendingFileLoadIDs.insert(bufferID)
+
+        Task.detached(priority: .userInitiated) { [weak self, bufferID, url] in
+            do {
+                var encoding = String.Encoding.utf8
+                let text = try String(contentsOf: url, usedEncoding: &encoding)
+                let language = EditorLanguage.detect(fileName: url.lastPathComponent, text: text)
+                await self?.completeOpenFile(bufferID: bufferID, url: url, result: .success((text, language)))
+            } catch {
+                await self?.completeOpenFile(bufferID: bufferID, url: url, result: .failure(error))
+            }
+        }
+    }
+
+    private func completeOpenFile(
+        bufferID: UUID,
+        url: URL,
+        result: Result<(String, EditorLanguage), Error>
+    ) {
+        guard pendingFileLoadIDs.remove(bufferID) != nil,
+              let index = buffers.firstIndex(where: { $0.id == bufferID }) else {
+            return
+        }
+
+        switch result {
+        case .success(let payload):
+            guard buffers[index].filePath == url.path, !buffers[index].isDirty else { return }
+            buffers[index].text = payload.0
+            buffers[index].language = payload.1
+            buffers[index].updatedAt = Date()
+            buffers[index].selectionRanges = [.zero]
+        case .failure(let error):
+            let wasSelected = selectedBufferID == bufferID
+            buffers.remove(at: index)
+            if wasSelected {
+                if buffers.isEmpty {
+                    let buffer = EditorBuffer.scratch(index: 1)
+                    buffers.append(buffer)
+                    selectedBufferID = buffer.id
+                } else {
+                    selectedBufferID = buffers[min(index, buffers.count - 1)].id
+                }
+            }
             lastError = "Could not open \(url.lastPathComponent): \(error.localizedDescription)"
         }
+
+        persistSoon()
     }
 
     func pairNetworkPeer(_ deviceID: String) {
@@ -637,8 +679,14 @@ final class EditorStore: ObservableObject {
         let query: String
         if let primarySelection {
             query = nsText.substring(with: primarySelection.nsRange)
-        } else {
+        } else if !findQuery.isEmpty {
             query = findQuery
+        } else if let word = wordRange(at: selections.first?.location ?? 0, in: nsText) {
+            buffers[selectedIndex].selectionRanges = [word]
+            persistSoon()
+            return
+        } else {
+            return
         }
 
         guard !query.isEmpty else { return }
@@ -648,6 +696,41 @@ final class EditorStore: ObservableObject {
             buffers[selectedIndex].selectionRanges = selections + [next]
             persistSoon()
         }
+    }
+
+    private func wordRange(at location: Int, in nsText: NSString) -> TextRange? {
+        guard nsText.length > 0 else { return nil }
+
+        let characterSet = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
+        func isWordCharacter(_ index: Int) -> Bool {
+            guard index >= 0, index < nsText.length,
+                  let scalar = UnicodeScalar(nsText.character(at: index)) else {
+                return false
+            }
+            return characterSet.contains(scalar)
+        }
+
+        var index = min(max(0, location), nsText.length - 1)
+        if !isWordCharacter(index) {
+            if location > 0, isWordCharacter(location - 1) {
+                index = location - 1
+            } else {
+                return nil
+            }
+        }
+
+        var start = index
+        while start > 0, isWordCharacter(start - 1) {
+            start -= 1
+        }
+
+        var end = index + 1
+        while end < nsText.length, isWordCharacter(end) {
+            end += 1
+        }
+
+        guard end > start else { return nil }
+        return TextRange(location: start, length: end - start)
     }
 
     func clearAdditionalCursors() {

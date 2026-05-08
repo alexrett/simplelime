@@ -49,14 +49,42 @@ extension NSTextView {
             )
         }
 
-        let characterIndex = min(location, nsText.length - 1)
-        let glyphIndex = layoutManager.glyphIndexForCharacter(at: characterIndex)
-        let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
+        let lineLocation = min(location, nsText.length - 1)
+        let lineRange = nsText.lineRange(for: NSRange(location: lineLocation, length: 0))
+        let glyphRange = layoutManager.glyphRange(
+            forCharacterRange: lineRange,
+            actualCharacterRange: nil
+        )
+
+        guard glyphRange.length > 0 else {
+            let glyphIndex = layoutManager.glyphIndexForCharacter(at: lineLocation)
+            let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
+            return NSRect(
+                x: lineRect.minX + origin.x,
+                y: lineRect.minY + origin.y,
+                width: max(lineRect.width, visibleRect.width),
+                height: lineRect.height
+            )
+        }
+
+        var unionRect: NSRect?
+        layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { rect, _, _, _, _ in
+            let translated = NSRect(
+                x: rect.minX + origin.x,
+                y: rect.minY + origin.y,
+                width: max(rect.width, self.visibleRect.width),
+                height: rect.height
+            )
+            unionRect = unionRect.map { $0.union(translated) } ?? translated
+        }
+
+        guard let unionRect else { return nil }
+
         return NSRect(
-            x: lineRect.minX + origin.x,
-            y: lineRect.minY + origin.y,
-            width: max(lineRect.width, visibleRect.width),
-            height: lineRect.height
+            x: unionRect.minX,
+            y: unionRect.minY,
+            width: max(unionRect.width, visibleRect.width),
+            height: unionRect.height
         )
     }
 }

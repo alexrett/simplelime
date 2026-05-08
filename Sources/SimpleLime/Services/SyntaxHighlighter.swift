@@ -2,6 +2,8 @@ import AppKit
 import Foundation
 
 enum SyntaxHighlighter {
+    private static let complexHighlightCharacterLimit = 250_000
+
     static func apply(to textView: NSTextView, language: EditorLanguage, fontSize: CGFloat) {
         let storage = textView.textStorage
         let string = textView.string
@@ -25,6 +27,11 @@ enum SyntaxHighlighter {
             ],
             range: fullRange
         )
+
+        guard fullRange.length <= complexHighlightCharacterLimit else {
+            storage?.endEditing()
+            return
+        }
 
         switch language {
         case .markdown:

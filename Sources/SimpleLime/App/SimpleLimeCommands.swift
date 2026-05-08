@@ -104,6 +104,7 @@ struct SimpleLimeCommands: Commands {
             Button("Add Next Occurrence") {
                 store?.addNextOccurrence()
             }
+            .keyboardShortcut("g", modifiers: [.command, .option])
 
             Button("Single Cursor") {
                 store?.escape()

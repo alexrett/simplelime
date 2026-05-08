@@ -66,6 +66,8 @@ struct EditorWorkspaceView: View {
             store.showGlobalFind()
         case .selectAllMatches:
             store.selectAllMatches()
+        case .addNextOccurrence:
+            store.addNextOccurrence()
         case .transform(let transform):
             store.performTextTransform(transform)
         case .increaseFontSize:

@@ -5,7 +5,7 @@ MODE="${1:-run}"
 APP_NAME="SimpleLime"
 BUNDLE_ID="com.whitehappypony.SimpleLime"
 MIN_SYSTEM_VERSION="13.0"
-APP_VERSION="0.3.1"
+APP_VERSION="0.3.2"
 APP_BUILD="1"
 APP_DESCRIPTION="Scratch-first text editor for temporary notes, Markdown, and code."
 

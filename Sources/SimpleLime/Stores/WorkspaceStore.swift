@@ -13,6 +13,11 @@ final class WorkspaceStore: ObservableObject {
     private var openURLObserver: NSObjectProtocol?
     private var manualWindows: [UUID: NSWindow] = [:]
     private var manualWindowDelegates: [UUID: WindowDelegate] = [:]
+    // Keep closed manual windows alive for the process lifetime. Releasing these custom
+    // full-size-content SwiftUI windows during or shortly after close can crash AppKit.
+    private var retiredManualWindows: [NSWindow] = []
+    private var retiredManualWindowDelegates: [WindowDelegate] = []
+    private var closingManualGroupIDs = Set<UUID>()
     private var isTerminating = false
 
     init(persistence: SessionPersistence = SessionPersistence()) {
@@ -241,6 +246,8 @@ final class WorkspaceStore: ObservableObject {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = false
+        window.isReleasedWhenClosed = false
+        window.animationBehavior = .none
 
         let delegate = WindowDelegate { [weak self] in
             self?.handleManualWindowWillClose(groupID: groupID)
@@ -252,8 +259,26 @@ final class WorkspaceStore: ObservableObject {
     }
 
     private func handleManualWindowWillClose(groupID: UUID) {
-        manualWindows[groupID] = nil
-        manualWindowDelegates[groupID] = nil
+        guard !closingManualGroupIDs.contains(groupID) else { return }
+        closingManualGroupIDs.insert(groupID)
+
+        if let closingWindow = manualWindows[groupID] {
+            retiredManualWindows.append(closingWindow)
+            manualWindows[groupID] = nil
+        }
+
+        if let closingDelegate = manualWindowDelegates[groupID] {
+            retiredManualWindowDelegates.append(closingDelegate)
+            manualWindowDelegates[groupID] = nil
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(700)) { [weak self] in
+            self?.finalizeManualWindowClose(groupID: groupID)
+        }
+    }
+
+    private func finalizeManualWindowClose(groupID: UUID) {
+        closingManualGroupIDs.remove(groupID)
 
         guard !isTerminating, groupID != primaryGroupID else {
             persistSoon()

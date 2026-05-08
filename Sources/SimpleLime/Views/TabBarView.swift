@@ -31,15 +31,22 @@ final class TabBarControl: NSView, NSDraggingSource {
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: 38)
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        setContentHuggingPriority(.required, for: .vertical)
+        setContentCompressionResistancePriority(.required, for: .vertical)
         wantsLayer = true
         registerForDraggedTypes([Self.tabPasteboardType])
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
+        setContentHuggingPriority(.required, for: .vertical)
+        setContentCompressionResistancePriority(.required, for: .vertical)
         wantsLayer = true
         registerForDraggedTypes([Self.tabPasteboardType])
     }

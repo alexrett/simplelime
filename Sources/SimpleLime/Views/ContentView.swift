@@ -17,6 +17,7 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             TabBarView(store: store, isFullScreen: chromeState.isFullScreen)
+                .frame(height: 38)
                 .zIndex(20)
 
             if store.findPanelMode != .hidden {

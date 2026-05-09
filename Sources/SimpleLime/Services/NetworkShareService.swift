@@ -1,6 +1,9 @@
 import Combine
 import Foundation
 @preconcurrency import MultipeerConnectivity
+#if os(iOS)
+import UIKit
+#endif
 
 final class NetworkShareService: NSObject, ObservableObject {
     private static let serviceType = "simplelime"
@@ -425,12 +428,18 @@ final class NetworkShareService: NSObject, ObservableObject {
     }
 
     private static func makeDisplayName(deviceID: String) -> String {
+        #if os(iOS)
+        let rawName = UIDevice.current.name
+        let fallbackName = UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
+        #else
         let rawName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        let fallbackName = "Mac"
+        #endif
         let baseName = rawName
             .replacingOccurrences(of: ".local", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let shortID = String(deviceID.prefix(6))
-        let name = baseName.isEmpty ? "Mac" : baseName
+        let name = baseName.isEmpty ? fallbackName : baseName
         let maxBaseLength = max(1, 58 - shortID.count)
         let clippedName = String(name.prefix(maxBaseLength))
 

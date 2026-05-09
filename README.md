@@ -20,7 +20,7 @@ SimpleLime is not trying to replace a full IDE. It is a fast working notebook wi
 - Basic syntax highlighting for Markdown, Swift, JavaScript, TypeScript, JSON, HTML, CSS, Python, Ruby, Go, Rust, and shell
 - Markdown preview
 - Find, replace, regex search, find in all tabs, select all matches
-- Multi-cursor basics
+- Multi-cursor editing
 - Text transforms: uppercase, lowercase, title case, duplicate line or selection, sort lines, unique lines, trim trailing whitespace, join lines
 - Font size controls
 - AI chat per tab with multiple sessions
@@ -99,7 +99,7 @@ Set `IDENTITY` and `NOTARY_PROFILE` in `.env.local` if you need to override the 
 
 ## Requirements
 
-- macOS 13.0 (Ventura) or later
+- macOS 14.0 (Sonoma) or later
 - Works on Apple Silicon and Intel Macs
 
 ## License

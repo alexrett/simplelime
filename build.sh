@@ -8,7 +8,7 @@ BUNDLE_ID="com.whitehappypony.SimpleLime"
 DISPLAY_NAME="SimpleLime"
 VERSION="0.3.7"
 BUILD="1"
-MIN_OS="13.0"
+MIN_OS="14.0"
 IDENTITY="${IDENTITY:-Developer ID Application: Alex Malikov (525W3628D2)}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-notarytool}"
 

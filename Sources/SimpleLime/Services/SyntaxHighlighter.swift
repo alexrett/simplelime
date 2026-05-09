@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import STTextView
 
 enum SyntaxHighlighter {
     private static let complexHighlightCharacterLimit = 250_000
@@ -43,6 +44,45 @@ enum SyntaxHighlighter {
         }
 
         storage?.endEditing()
+    }
+
+    @MainActor
+    static func apply(to textView: STTextView, language: EditorLanguage, fontSize: CGFloat) {
+        let string = textView.text ?? ""
+        let fullRange = NSRange(location: 0, length: (string as NSString).length)
+        let baseFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 2
+
+        textView.font = baseFont
+        textView.textColor = .labelColor
+        textView.defaultParagraphStyle = paragraph
+
+        guard fullRange.length > 0 else {
+            return
+        }
+
+        textView.setAttributes(
+            [
+                .font: baseFont,
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paragraph
+            ],
+            range: fullRange
+        )
+
+        guard fullRange.length <= complexHighlightCharacterLimit else {
+            return
+        }
+
+        switch language {
+        case .markdown:
+            applyMarkdown(to: textView, text: string, baseFont: baseFont)
+        case .plain:
+            break
+        default:
+            applyCode(to: textView, text: string, language: language, baseFont: baseFont)
+        }
     }
 
     private static func applyMarkdown(to storage: NSTextStorage?, text: String, baseFont: NSFont) {
@@ -107,6 +147,68 @@ enum SyntaxHighlighter {
         }
     }
 
+    private static func applyMarkdown(to textView: STTextView, text: String, baseFont: NSFont) {
+        applyPattern("(?m)^#{1,6}\\s.*$", to: textView, text: text) { range in
+            let levelText = (text as NSString).substring(with: range)
+            let level = levelText.prefix { $0 == "#" }.count
+            let size = max(baseFont.pointSize + CGFloat(7 - level), baseFont.pointSize)
+            return [
+                .font: NSFont.systemFont(ofSize: size, weight: .semibold),
+                .foregroundColor: NSColor.systemBlue
+            ]
+        }
+
+        applyPattern("(?m)^>.*$", to: textView, text: text) { _ in
+            [.foregroundColor: NSColor.systemTeal]
+        }
+
+        applyPattern("(?m)^\\s*[-*+]\\s+", to: textView, text: text) { _ in
+            [.foregroundColor: NSColor.systemOrange]
+        }
+
+        applyPattern("`[^`]+`", to: textView, text: text) { _ in
+            [
+                .font: NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .medium),
+                .foregroundColor: NSColor.systemPurple
+            ]
+        }
+
+        applyPattern("\\*\\*[^*]+\\*\\*", to: textView, text: text) { _ in
+            [.font: NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .bold)]
+        }
+
+        applyPattern("https?://[^\\s)]+", to: textView, text: text) { _ in
+            [
+                .foregroundColor: NSColor.linkColor,
+                .underlineStyle: NSUnderlineStyle.single.rawValue
+            ]
+        }
+    }
+
+    private static func applyCode(to textView: STTextView, text: String, language: EditorLanguage, baseFont: NSFont) {
+        applyPattern("\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*'", to: textView, text: text) { _ in
+            [.foregroundColor: NSColor.systemRed]
+        }
+
+        applyPattern("\\b\\d+(?:\\.\\d+)?\\b", to: textView, text: text) { _ in
+            [.foregroundColor: NSColor.systemOrange]
+        }
+
+        applyPattern(commentPattern(for: language), to: textView, text: text) { _ in
+            [.foregroundColor: NSColor.systemGreen]
+        }
+
+        let keywords = keywordPattern(for: language)
+        if !keywords.isEmpty {
+            applyPattern("\\b(\(keywords))\\b", to: textView, text: text) { _ in
+                [
+                    .font: NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .semibold),
+                    .foregroundColor: NSColor.systemBlue
+                ]
+            }
+        }
+    }
+
     private static func keywordPattern(for language: EditorLanguage) -> String {
         switch language {
         case .swift:
@@ -163,6 +265,25 @@ enum SyntaxHighlighter {
         regex.enumerateMatches(in: text, range: fullRange) { match, _, _ in
             guard let range = match?.range, range.location != NSNotFound else { return }
             storage?.addAttributes(attributes(range), range: range)
+        }
+    }
+
+    private static func applyPattern(
+        _ pattern: String,
+        to textView: STTextView,
+        text: String,
+        attributes: (NSRange) -> [NSAttributedString.Key: Any]
+    ) {
+        guard !pattern.isEmpty,
+              let regex = try? NSRegularExpression(pattern: pattern) else {
+            return
+        }
+
+        let nsText = text as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        regex.enumerateMatches(in: text, range: fullRange) { match, _, _ in
+            guard let range = match?.range, range.location != NSNotFound else { return }
+            textView.addAttributes(attributes(range), range: range)
         }
     }
 }

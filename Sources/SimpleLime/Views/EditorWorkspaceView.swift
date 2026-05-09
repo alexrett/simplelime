@@ -48,6 +48,7 @@ struct EditorWorkspaceView: View {
             ),
             language: store.buffers.first(where: { $0.id == buffer.id })?.language ?? buffer.language,
             fontSize: store.fontSize,
+            wrapsLines: store.wrapsLines,
             onShortcut: handleShortcut,
             onRegisterEditorCommandHandler: { handler in
                 store.registerEditorCommandHandler(handler)
@@ -68,6 +69,8 @@ struct EditorWorkspaceView: View {
             store.selectAllMatches()
         case .addNextOccurrence:
             store.addNextOccurrence()
+        case .toggleWrapLines:
+            store.toggleWrapLines()
         case .transform(let transform):
             store.performTextTransform(transform)
         case .increaseFontSize:
@@ -103,6 +106,14 @@ private struct StatusBarView: View {
                     .foregroundStyle(.secondary)
             }
             .menuStyle(.borderlessButton)
+            .fixedSize()
+
+            Button(store.wrapsLines ? "Wrap" : "No Wrap") {
+                store.toggleWrapLines()
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Toggle word wrap")
             .fixedSize()
 
             Text(buffer.filePath ?? "Scratch")

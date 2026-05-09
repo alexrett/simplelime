@@ -192,6 +192,11 @@ struct SimpleLimeCommands: Commands {
                 store?.isPreviewVisible.toggle()
             }
             .keyboardShortcut("p", modifiers: [.command, .shift])
+
+            Button(store?.wrapsLines == true ? "Disable Word Wrap" : "Enable Word Wrap") {
+                store?.toggleWrapLines()
+            }
+            .keyboardShortcut("z", modifiers: [.command, .option])
         }
     }
 }

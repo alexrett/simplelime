@@ -11,6 +11,11 @@ final class EditorStore: ObservableObject {
     @Published var findPanelMode: FindPanelMode = .hidden
     @Published var isPreviewVisible = false
     @Published var fontSize: Double = 14
+    @Published var wrapsLines: Bool {
+        didSet {
+            UserDefaults.standard.set(wrapsLines, forKey: Self.wrapsLinesDefaultsKey)
+        }
+    }
     @Published var lastError: String?
     @Published var pendingCloseBuffer: EditorBuffer?
     @Published var isAIPanelVisible = false
@@ -32,6 +37,8 @@ final class EditorStore: ObservableObject {
     private var aiStreamingMessageIDs: [UUID: UUID] = [:]
     private var pendingFileLoadIDs = Set<UUID>()
 
+    private static let wrapsLinesDefaultsKey = "editor.wrapsLines"
+
     init(
         windowGroupID: UUID = UUID(),
         initialBuffers: [EditorBuffer]? = nil,
@@ -44,6 +51,7 @@ final class EditorStore: ObservableObject {
         self.windowGroupID = windowGroupID
         self.persistence = persistence
         self.networkShare = networkShare
+        self.wrapsLines = UserDefaults.standard.object(forKey: Self.wrapsLinesDefaultsKey) as? Bool ?? true
         let loaded: (buffers: [EditorBuffer], selectedID: UUID?)
 
         if let initialBuffers {
@@ -602,6 +610,10 @@ final class EditorStore: ObservableObject {
 
     func decreaseFontSize() {
         fontSize = max(10, fontSize - 1)
+    }
+
+    func toggleWrapLines() {
+        wrapsLines.toggle()
     }
 
     func findNext() {

@@ -7,6 +7,7 @@ struct CodeEditorView: NSViewRepresentable {
 
     var language: EditorLanguage
     var fontSize: Double
+    var wrapsLines: Bool
     var onShortcut: (EditorShortcut) -> Void
     var onRegisterEditorCommandHandler: (@escaping (EditorCommand) -> Bool) -> Void
 
@@ -47,14 +48,11 @@ struct CodeEditorView: NSViewRepresentable {
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
-        textView.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
-        textView.textContainer?.widthTracksTextView = true
         textView.textContainerInset = NSSize(width: 14, height: 14)
         textView.string = text
 
         scrollView.documentView = textView
+        configureWrapping(textView: textView, in: scrollView, wrapsLines: wrapsLines)
         scrollView.verticalRulerView = LineNumberRulerView(textView: textView)
         scrollView.hasVerticalRuler = true
         scrollView.rulersVisible = true
@@ -80,6 +78,7 @@ struct CodeEditorView: NSViewRepresentable {
         if let textView = textView as? EditorTextView {
             registerCommandHandler(for: textView)
         }
+        configureWrapping(textView: textView, in: scrollView, wrapsLines: wrapsLines)
         applySyntaxHighlighting(to: textView, language: language, fontSize: CGFloat(fontSize))
         (scrollView.verticalRulerView as? LineNumberRulerView)?.invalidateLineNumbers()
         applySelection(selectionRanges, to: textView)
@@ -102,6 +101,47 @@ struct CodeEditorView: NSViewRepresentable {
                 textView.scrollRangeToVisible(last)
             }
         }
+    }
+
+    private func configureWrapping(textView: NSTextView, in scrollView: NSScrollView, wrapsLines: Bool) {
+        if let editorTextView = textView as? EditorTextView,
+           editorTextView.configuredWrapsLines == wrapsLines {
+            return
+        }
+
+        textView.isVerticallyResizable = true
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+
+        if wrapsLines {
+            scrollView.hasHorizontalScroller = false
+            textView.isHorizontallyResizable = false
+            textView.autoresizingMask = [.width]
+            textView.textContainer?.widthTracksTextView = true
+            textView.textContainer?.containerSize = NSSize(
+                width: scrollView.contentSize.width,
+                height: CGFloat.greatestFiniteMagnitude
+            )
+            if textView.frame.width != scrollView.contentSize.width {
+                textView.frame.size.width = scrollView.contentSize.width
+            }
+        } else {
+            scrollView.hasHorizontalScroller = true
+            textView.isHorizontallyResizable = true
+            textView.autoresizingMask = [.height]
+            textView.textContainer?.widthTracksTextView = false
+            textView.textContainer?.containerSize = NSSize(
+                width: CGFloat.greatestFiniteMagnitude,
+                height: CGFloat.greatestFiniteMagnitude
+            )
+            textView.frame.size.width = max(textView.frame.width, scrollView.contentSize.width)
+        }
+
+        textView.needsDisplay = true
+        (textView as? EditorTextView)?.configuredWrapsLines = wrapsLines
+        textView.layoutManager?.invalidateLayout(forCharacterRange: NSRange(location: 0, length: (textView.string as NSString).length), actualCharacterRange: nil)
     }
 
     private func registerCommandHandler(for textView: EditorTextView) {
@@ -172,6 +212,8 @@ final class EditorTextView: NSTextView {
     var needsSyntaxHighlight = true
     var highlightedLanguage: EditorLanguage?
     var highlightedFontSize: CGFloat?
+    var configuredWrapsLines: Bool?
+    private var multiCursorDragState: MultiCursorDragState?
 
     override var acceptsFirstResponder: Bool {
         true
@@ -226,6 +268,8 @@ final class EditorTextView: NSTextView {
             shortcut = .selectAllMatches
         case 5 where flags.contains(.option):
             shortcut = .addNextOccurrence
+        case 6 where flags.contains(.option):
+            shortcut = .toggleWrapLines
         case 32 where flags.contains(.option) && flags.contains(.shift):
             shortcut = .transform(.uniqueLines)
         case 32 where flags.contains(.shift):
@@ -264,8 +308,45 @@ final class EditorTextView: NSTextView {
             return
         }
 
+        window?.makeFirstResponder(self)
+        multiCursorDragState = MultiCursorDragState(
+            anchorPoint: convert(event.locationInWindow, from: nil),
+            anchorLocation: location
+        )
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard var dragState = multiCursorDragState else {
+            super.mouseDragged(with: event)
+            return
+        }
+
+        dragState.didDrag = true
+        multiCursorDragState = dragState
+
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let point = convert(event.locationInWindow, from: nil)
+        let ranges = columnRanges(
+            from: dragState.anchorPoint,
+            to: point,
+            createsSelections: flags.contains(.shift)
+        )
+
+        guard !ranges.isEmpty else { return }
+        selectedRanges = normalizedSelectionValues(ranges)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let dragState = multiCursorDragState else {
+            super.mouseUp(with: event)
+            return
+        }
+
+        multiCursorDragState = nil
+        guard !dragState.didDrag else { return }
+
         var ranges = selectedRanges.map(\.rangeValue)
-        ranges.append(NSRange(location: location, length: 0))
+        ranges.append(NSRange(location: dragState.anchorLocation, length: 0))
         selectedRanges = normalizedSelectionValues(ranges)
     }
 
@@ -296,6 +377,16 @@ final class EditorTextView: NSTextView {
         _ = replaceForTyping(ranges: ranges, replacement: "\n")
     }
 
+    override func insertTab(_ sender: Any?) {
+        guard shouldApplyMultiCursorEdit else {
+            super.insertTab(sender)
+            return
+        }
+
+        let ranges = selectedRanges.map(\.rangeValue)
+        _ = replaceForTyping(ranges: ranges, replacement: "\t")
+    }
+
     override func deleteBackward(_ sender: Any?) {
         guard shouldApplyMultiCursorEdit else {
             super.deleteBackward(sender)
@@ -320,6 +411,17 @@ final class EditorTextView: NSTextView {
 
     override func keyDown(with event: NSEvent) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags.contains(.option), !flags.contains(.command), !flags.contains(.control) {
+            switch event.keyCode {
+            case 126:
+                if addVerticalCursor(direction: -1) { return }
+            case 125:
+                if addVerticalCursor(direction: 1) { return }
+            default:
+                break
+            }
+        }
+
         if event.keyCode == 48, flags.contains(.control), !flags.contains(.command), !flags.contains(.option) {
             let shortcut: EditorShortcut = flags.contains(.shift) ? .previousTab : .nextTab
             if shortcutHandler?(shortcut) == true {
@@ -424,51 +526,165 @@ final class EditorTextView: NSTextView {
     private func replace(ranges: [NSRange], replacements: [String]) -> Bool {
         guard ranges.count == replacements.count, !ranges.isEmpty else { return false }
 
-        let sorted = zip(ranges, replacements).sorted { lhs, rhs in
-            lhs.0.location > rhs.0.location
-        }
-
-        undoManager?.beginUndoGrouping()
-        defer { undoManager?.endUndoGrouping() }
-
-        var newSelections: [NSValue] = []
-        for (range, replacement) in sorted {
-            guard shouldChangeText(in: range, replacementString: replacement) else { continue }
-            textStorage?.replaceCharacters(in: range, with: replacement)
-            didChangeText()
-            newSelections.append(NSValue(range: NSRange(location: range.location, length: replacement.utf16.count)))
-        }
-
-        selectedRanges = newSelections.reversed()
-        return true
+        let edits = zip(ranges, replacements).map { TextEdit(range: $0.0, replacement: $0.1) }
+        return apply(edits: edits, selectionMode: .selectReplacement)
     }
 
     private func replaceForTyping(ranges: [NSRange], replacement: String) -> Bool {
-        guard !ranges.isEmpty else { return false }
+        let edits = normalizedRanges(ranges).map { TextEdit(range: $0, replacement: replacement) }
+        return apply(edits: edits, selectionMode: .cursorAfterReplacement)
+    }
 
-        let sorted = normalizedRanges(ranges).sorted { lhs, rhs in
-            lhs.location > rhs.location
+    private func apply(edits: [TextEdit], selectionMode: MultiEditSelectionMode) -> Bool {
+        let preparedEdits = nonOverlappingEdits(edits)
+        guard !preparedEdits.isEmpty else { return false }
+
+        let allowedEdits = preparedEdits.filter {
+            shouldChangeText(in: $0.range, replacementString: $0.replacement)
         }
+        guard !allowedEdits.isEmpty else { return false }
+
+        let newSelections = selectionsAfterApplying(edits: allowedEdits, selectionMode: selectionMode)
 
         undoManager?.beginUndoGrouping()
         defer { undoManager?.endUndoGrouping() }
 
-        var newSelections: [NSValue] = []
-        for range in sorted {
-            guard shouldChangeText(in: range, replacementString: replacement) else { continue }
-            textStorage?.replaceCharacters(in: range, with: replacement)
-            didChangeText()
-            newSelections.append(
-                NSValue(range: NSRange(location: range.location + replacement.utf16.count, length: 0))
-            )
+        textStorage?.beginEditing()
+        for edit in allowedEdits.reversed() {
+            textStorage?.replaceCharacters(in: edit.range, with: edit.replacement)
         }
+        textStorage?.endEditing()
+        didChangeText()
 
-        selectedRanges = newSelections.reversed()
+        selectedRanges = newSelections
         return true
+    }
+
+    private func selectionsAfterApplying(
+        edits: [TextEdit],
+        selectionMode: MultiEditSelectionMode
+    ) -> [NSValue] {
+        var delta = 0
+        return edits.map { edit in
+            let replacementLength = edit.replacement.utf16.count
+            let location = edit.range.location + delta
+            let selectionRange: NSRange
+            switch selectionMode {
+            case .cursorAfterReplacement:
+                selectionRange = NSRange(location: location + replacementLength, length: 0)
+            case .selectReplacement:
+                selectionRange = NSRange(location: location, length: replacementLength)
+            }
+
+            delta += replacementLength - edit.range.length
+            return NSValue(range: selectionRange)
+        }
     }
 
     private var shouldApplyMultiCursorEdit: Bool {
         selectedRanges.count > 1
+    }
+
+    private func addVerticalCursor(direction: Int) -> Bool {
+        let cursor = selectedRanges.last?.rangeValue ?? NSRange(location: 0, length: 0)
+        let location = cursor.location + cursor.length
+        guard let currentPoint = caretPoint(for: location),
+              let targetLocation = insertionLocation(
+                for: NSPoint(
+                    x: currentPoint.x,
+                    y: currentPoint.y + (direction < 0 ? -editorLineHeight : editorLineHeight)
+                )
+              ) else {
+            return false
+        }
+
+        var ranges = selectedRanges.map(\.rangeValue)
+        ranges.append(NSRange(location: targetLocation, length: 0))
+        selectedRanges = normalizedSelectionValues(ranges)
+        return true
+    }
+
+    private func columnRanges(
+        from anchorPoint: NSPoint,
+        to point: NSPoint,
+        createsSelections: Bool
+    ) -> [NSRange] {
+        let fragments = lineFragmentsBetween(anchorPoint, point)
+        guard !fragments.isEmpty else {
+            return [NSRange(location: multiCursorDragState?.anchorLocation ?? 0, length: 0)]
+        }
+
+        return fragments.compactMap { fragment in
+            let y = fragment.midY
+            if createsSelections {
+                guard let start = insertionLocation(for: NSPoint(x: anchorPoint.x, y: y)),
+                      let end = insertionLocation(for: NSPoint(x: point.x, y: y)) else {
+                    return nil
+                }
+
+                return NSRange(location: min(start, end), length: abs(end - start))
+            }
+
+            guard let location = insertionLocation(for: NSPoint(x: anchorPoint.x, y: y)) else {
+                return nil
+            }
+
+            return NSRange(location: location, length: 0)
+        }
+    }
+
+    private func lineFragmentsBetween(_ firstPoint: NSPoint, _ secondPoint: NSPoint) -> [NSRect] {
+        guard let layoutManager,
+              let textContainer else {
+            return []
+        }
+
+        layoutManager.ensureLayout(for: textContainer)
+
+        let minY = min(firstPoint.y, secondPoint.y)
+        let maxY = max(firstPoint.y, secondPoint.y)
+        let origin = textContainerOrigin
+        var fragments: [NSRect] = []
+
+        if layoutManager.numberOfGlyphs == 0 {
+            return [
+                NSRect(
+                    x: origin.x,
+                    y: origin.y,
+                    width: visibleRect.width,
+                    height: editorLineHeight
+                )
+            ]
+        }
+
+        layoutManager.enumerateLineFragments(
+            forGlyphRange: NSRange(location: 0, length: layoutManager.numberOfGlyphs)
+        ) { rect, _, _, _, _ in
+            let translated = NSRect(
+                x: rect.minX + origin.x,
+                y: rect.minY + origin.y,
+                width: max(rect.width, self.visibleRect.width),
+                height: rect.height
+            )
+            if translated.maxY >= minY, translated.minY <= maxY {
+                fragments.append(translated)
+            }
+        }
+
+        let extraLineRect = layoutManager.extraLineFragmentRect
+        if !extraLineRect.isEmpty, extraLineRect.height > 0 {
+            let translated = NSRect(
+                x: extraLineRect.minX + origin.x,
+                y: extraLineRect.minY + origin.y,
+                width: max(extraLineRect.width, visibleRect.width),
+                height: extraLineRect.height
+            )
+            if translated.maxY >= minY, translated.minY <= maxY {
+                fragments.append(translated)
+            }
+        }
+
+        return fragments.sorted { $0.minY < $1.minY }
     }
 
     private func deletionRanges(backward: Bool) -> [NSRange] {
@@ -517,6 +733,46 @@ final class EditorTextView: NSTextView {
         return min(max(0, characterIndex), nsText.length)
     }
 
+    private func caretPoint(for location: Int) -> NSPoint? {
+        guard let layoutManager,
+              let textContainer else {
+            return nil
+        }
+
+        layoutManager.ensureLayout(for: textContainer)
+        let textLength = (string as NSString).length
+        let clampedLocation = min(max(0, location), textLength)
+        let origin = textContainerOrigin
+
+        guard textLength > 0, layoutManager.numberOfGlyphs > 0 else {
+            return NSPoint(x: origin.x, y: origin.y + editorLineHeight / 2)
+        }
+
+        if clampedLocation == textLength, (string as NSString).endsWithLineBreak {
+            let extraLineRect = layoutManager.extraLineFragmentRect
+            if !extraLineRect.isEmpty {
+                return NSPoint(
+                    x: extraLineRect.minX + origin.x,
+                    y: extraLineRect.midY + origin.y
+                )
+            }
+        }
+
+        let characterIndex = min(clampedLocation, textLength - 1)
+        let glyphIndex = layoutManager.glyphIndexForCharacter(at: characterIndex)
+        let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
+        let glyphRect = layoutManager.boundingRect(
+            forGlyphRange: NSRange(location: glyphIndex, length: 1),
+            in: textContainer
+        )
+
+        let isAfterLastCharacter = clampedLocation == textLength
+        return NSPoint(
+            x: (isAfterLastCharacter ? glyphRect.maxX : glyphRect.minX) + origin.x,
+            y: lineRect.midY + origin.y
+        )
+    }
+
     private func normalizedSelectionValues(_ ranges: [NSRange]) -> [NSValue] {
         normalizedRanges(ranges).map(NSValue.init(range:))
     }
@@ -533,6 +789,26 @@ final class EditorTextView: NSTextView {
             return NSRange(location: location, length: length)
         }
         .sorted { $0.location < $1.location }
+    }
+
+    private func nonOverlappingEdits(_ edits: [TextEdit]) -> [TextEdit] {
+        var previousEnd = -1
+        var seen = Set<String>()
+        return edits
+            .map { edit in
+                TextEdit(
+                    range: normalizedRanges([edit.range]).first ?? NSRange(location: 0, length: 0),
+                    replacement: edit.replacement
+                )
+            }
+            .sorted { $0.range.location < $1.range.location }
+            .filter { edit in
+                let key = "\(edit.range.location):\(edit.range.length)"
+                guard seen.insert(key).inserted else { return false }
+                guard edit.range.location >= previousEnd else { return false }
+                previousEnd = edit.range.location + edit.range.length
+                return true
+            }
     }
 
     private func nonEmptySelectedRanges() -> [NSRange] {
@@ -574,6 +850,30 @@ final class EditorTextView: NSTextView {
 
         let output = transform(lines).joined(separator: "\n")
         return hasTrailingNewline ? "\(output)\n" : output
+    }
+}
+
+private struct MultiCursorDragState {
+    var anchorPoint: NSPoint
+    var anchorLocation: Int
+    var didDrag = false
+}
+
+private struct TextEdit {
+    var range: NSRange
+    var replacement: String
+}
+
+private enum MultiEditSelectionMode {
+    case cursorAfterReplacement
+    case selectReplacement
+}
+
+private extension NSString {
+    var endsWithLineBreak: Bool {
+        guard length > 0 else { return false }
+        let lastCharacter = character(at: length - 1)
+        return lastCharacter == 10 || lastCharacter == 13
     }
 }
 

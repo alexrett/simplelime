@@ -6,6 +6,7 @@ enum EditorShortcut {
     case showGlobalFind
     case selectAllMatches
     case addNextOccurrence
+    case toggleWrapLines
     case transform(TextTransform)
     case increaseFontSize
     case decreaseFontSize

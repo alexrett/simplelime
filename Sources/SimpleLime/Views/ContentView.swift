@@ -194,6 +194,9 @@ struct ContentView: View {
         case 5 where flags.contains(.option):
             store.addNextOccurrence()
             return nil
+        case 6 where flags.contains(.option):
+            store.toggleWrapLines()
+            return nil
         case 32 where flags.contains(.option) && flags.contains(.shift):
             store.performTextTransform(.uniqueLines)
             return nil

@@ -8,20 +8,26 @@ struct SettingsView: View {
     @AppStorage("ai.codex.arguments") private var codexArguments = AIAgentProvider.codex.defaultArguments
 
     var body: some View {
-        Form {
-            Section("Editor") {
-                HStack {
-                    Text("Editor Font Size")
-                    Spacer()
+        VStack(alignment: .leading, spacing: 22) {
+            section("Editor") {
+                settingRow("Font Size") {
                     Stepper(value: fontSizeBinding, in: 10...28, step: 1) {
                         Text("\(Int(activeStore.fontSize)) pt")
                             .monospacedDigit()
                             .frame(width: 54, alignment: .trailing)
                     }
+                    .fixedSize()
+                }
+
+                settingRow("Word Wrap") {
+                    Toggle("", isOn: wrapLinesBinding)
+                        .labelsHidden()
                 }
             }
 
-            Section("AI Agents") {
+            Divider()
+
+            section("AI Agents") {
                 agentSettings(
                     title: "Copilot",
                     executable: $copilotExecutable,
@@ -37,8 +43,10 @@ struct SettingsView: View {
                 )
             }
         }
-        .padding(20)
-        .frame(width: 520)
+        .padding(.top, 54)
+        .padding(.horizontal, 28)
+        .padding(.bottom, 28)
+        .frame(width: 560, height: 440, alignment: .topLeading)
     }
 
     private var activeStore: EditorStore {
@@ -52,26 +60,62 @@ struct SettingsView: View {
         )
     }
 
-    private func agentSettings(title: String, executable: Binding<String>, arguments: Binding<String>) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+    private var wrapLinesBinding: Binding<Bool> {
+        Binding(
+            get: { activeStore.wrapsLines },
+            set: { activeStore.wrapsLines = $0 }
+        )
+    }
+
+    private func section<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
             Text(title)
                 .font(.headline)
 
-            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 8) {
-                GridRow {
-                    Text("Command")
-                        .foregroundStyle(.secondary)
-                    TextField("", text: executable)
-                        .textFieldStyle(.roundedBorder)
-                }
-
-                GridRow {
-                    Text("Arguments")
-                        .foregroundStyle(.secondary)
-                    TextField("", text: arguments)
-                        .textFieldStyle(.roundedBorder)
-                }
+            VStack(alignment: .leading, spacing: 10) {
+                content()
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func settingRow<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(alignment: .center, spacing: 14) {
+            Text(title)
+                .foregroundStyle(.secondary)
+                .frame(width: 116, alignment: .leading)
+
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func agentSettings(
+        title: String,
+        executable: Binding<String>,
+        arguments: Binding<String>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+
+            settingRow("Command") {
+                TextField("", text: executable)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            settingRow("Arguments") {
+                TextField("", text: arguments)
+                    .textFieldStyle(.roundedBorder)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

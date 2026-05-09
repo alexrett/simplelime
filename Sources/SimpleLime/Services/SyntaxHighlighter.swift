@@ -18,6 +18,7 @@ enum SyntaxHighlighter {
         let baseFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = 2
+        let firstParagraph = firstParagraphStyle(from: paragraph)
 
         storage?.beginEditing()
         storage?.setAttributes(
@@ -28,6 +29,7 @@ enum SyntaxHighlighter {
             ],
             range: fullRange
         )
+        storage?.addAttributes([.paragraphStyle: firstParagraph], range: firstParagraphRange(in: string))
 
         guard fullRange.length <= complexHighlightCharacterLimit else {
             storage?.endEditing()
@@ -53,6 +55,7 @@ enum SyntaxHighlighter {
         let baseFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = 2
+        let firstParagraph = firstParagraphStyle(from: paragraph)
 
         textView.font = baseFont
         textView.textColor = .labelColor
@@ -70,6 +73,7 @@ enum SyntaxHighlighter {
             ],
             range: fullRange
         )
+        textView.addAttributes([.paragraphStyle: firstParagraph], range: firstParagraphRange(in: string))
 
         guard fullRange.length <= complexHighlightCharacterLimit else {
             return
@@ -121,6 +125,21 @@ enum SyntaxHighlighter {
                 .underlineStyle: NSUnderlineStyle.single.rawValue
             ]
         }
+    }
+
+    private static func firstParagraphStyle(from base: NSParagraphStyle) -> NSParagraphStyle {
+        let paragraph = base.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
+        paragraph.paragraphSpacingBefore = 12
+        return paragraph
+    }
+
+    private static func firstParagraphRange(in text: String) -> NSRange {
+        let nsText = text as NSString
+        guard nsText.length > 0 else {
+            return NSRange(location: 0, length: 0)
+        }
+
+        return nsText.paragraphRange(for: NSRange(location: 0, length: 0))
     }
 
     private static func applyCode(to storage: NSTextStorage?, text: String, language: EditorLanguage, baseFont: NSFont) {

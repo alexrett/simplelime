@@ -137,10 +137,15 @@ struct CodeEditorView: NSViewRepresentable {
             return
         }
 
+        let selectionRanges = textView.editorSelectionRanges
         SyntaxHighlighter.apply(to: textView, language: language, fontSize: fontSize)
         textView.needsSyntaxHighlight = false
         textView.highlightedLanguage = language
         textView.highlightedFontSize = fontSize
+
+        if selectionRanges.count > 1, textView.editorSelectionRanges != selectionRanges {
+            textView.setEditorSelectionRanges(selectionRanges)
+        }
     }
 
     final class Coordinator: NSObject, STTextViewDelegate {
@@ -310,6 +315,38 @@ final class EditorTextView: STTextView {
         super.keyDown(with: event)
     }
 
+    override func insertText(_ insertString: Any) {
+        if insertTextAcrossSelections(insertString, replacementRange: .notFound) {
+            return
+        }
+
+        super.insertText(insertString)
+    }
+
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        if insertTextAcrossSelections(string, replacementRange: replacementRange) {
+            return
+        }
+
+        super.insertText(string, replacementRange: replacementRange)
+    }
+
+    override func deleteBackward(_ sender: Any?) {
+        if deleteBackwardAcrossSelections() {
+            return
+        }
+
+        super.deleteBackward(sender)
+    }
+
+    override func deleteForward(_ sender: Any?) {
+        if deleteForwardAcrossSelections() {
+            return
+        }
+
+        super.deleteForward(sender)
+    }
+
     override func mouseDown(with event: NSEvent) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard isColumnCursorMouseModifier(flags),
@@ -413,6 +450,72 @@ final class EditorTextView: STTextView {
         guard ranges.count == replacements.count, !ranges.isEmpty else { return false }
         let edits = zip(ranges, replacements).map { TextEdit(range: $0.0, replacement: $0.1) }
         return apply(edits: edits, selectionMode: .selectReplacement)
+    }
+
+    private func insertTextAcrossSelections(_ insertString: Any, replacementRange: NSRange) -> Bool {
+        guard let replacement = plainText(from: insertString) else { return false }
+        let targetRanges = rangesForEditing(replacementRange: replacementRange)
+        guard targetRanges.count > 1 else { return false }
+
+        let edits = targetRanges.map { TextEdit(range: $0, replacement: replacement) }
+        return apply(edits: edits, selectionMode: .cursorAfterReplacement)
+    }
+
+    private func deleteBackwardAcrossSelections() -> Bool {
+        let ranges = editorSelectionRanges
+        guard ranges.count > 1 else { return false }
+
+        let nsText = editorNSString
+        let edits = ranges.compactMap { range -> TextEdit? in
+            let safeRange = normalizedRange(range)
+            if safeRange.length > 0 {
+                return TextEdit(range: safeRange, replacement: "")
+            }
+
+            guard safeRange.location > 0 else { return nil }
+            let deleteRange = nsText.rangeOfComposedCharacterSequence(at: safeRange.location - 1)
+            return TextEdit(range: deleteRange, replacement: "")
+        }
+
+        return apply(edits: edits, selectionMode: .cursorAfterReplacement)
+    }
+
+    private func deleteForwardAcrossSelections() -> Bool {
+        let ranges = editorSelectionRanges
+        guard ranges.count > 1 else { return false }
+
+        let nsText = editorNSString
+        let edits = ranges.compactMap { range -> TextEdit? in
+            let safeRange = normalizedRange(range)
+            if safeRange.length > 0 {
+                return TextEdit(range: safeRange, replacement: "")
+            }
+
+            guard safeRange.location < nsText.length else { return nil }
+            let deleteRange = nsText.rangeOfComposedCharacterSequence(at: safeRange.location)
+            return TextEdit(range: deleteRange, replacement: "")
+        }
+
+        return apply(edits: edits, selectionMode: .cursorAfterReplacement)
+    }
+
+    private func rangesForEditing(replacementRange: NSRange) -> [NSRange] {
+        if replacementRange.location != NSNotFound {
+            return normalizedRanges([replacementRange])
+        }
+
+        return editorSelectionRanges
+    }
+
+    private func plainText(from insertString: Any) -> String? {
+        switch insertString {
+        case let string as String:
+            return string
+        case let attributedString as NSAttributedString:
+            return attributedString.string
+        default:
+            return nil
+        }
     }
 
     private func apply(edits: [TextEdit], selectionMode: MultiEditSelectionMode) -> Bool {

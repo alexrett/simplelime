@@ -9,17 +9,32 @@ struct EditorWorkspaceView: View {
         VStack(spacing: 0) {
             if store.isAIPanelVisible {
                 HSplitView {
-                    mainEditorContent
+                    contentWithComments
                         .frame(minWidth: 180)
                     AIChatPanelView(store: store, buffer: buffer)
                 }
             } else {
-                mainEditorContent
+                contentWithComments
             }
 
             StatusBarView(store: store, buffer: buffer)
         }
         .clipped()
+    }
+
+    private var contentWithComments: some View {
+        Group {
+            if store.isCommentsPanelVisible {
+                HSplitView {
+                    mainEditorContent
+                        .frame(minWidth: 220)
+                    CommentsPanelView(store: store, buffer: buffer)
+                        .frame(minWidth: 240, idealWidth: 300, maxWidth: 420)
+                }
+            } else {
+                mainEditorContent
+            }
+        }
     }
 
     private var mainEditorContent: some View {
@@ -88,6 +103,12 @@ struct EditorWorkspaceView: View {
                     baseURL: buffer.filePath.map { URL(fileURLWithPath: $0).deletingLastPathComponent() },
                     fontSize: store.fontSize,
                     typewriterModeEnabled: store.isTypewriterModeEnabled,
+                    comments: store.comments(for: buffer),
+                    activeCommentID: store.selectedCommentID,
+                    collaborators: store.collaborators(for: buffer),
+                    onSelectComment: { commentID in
+                        store.selectComment(commentID)
+                    },
                     onShortcut: handleShortcut,
                     onRegisterEditorCommandHandler: { handler in
                         store.registerEditorCommandHandler(handler)
@@ -102,6 +123,9 @@ struct EditorWorkspaceView: View {
                     wrapsLines: store.wrapsLines,
                     focusModeEnabled: store.isFocusModeEnabled,
                     typewriterModeEnabled: store.isTypewriterModeEnabled,
+                    comments: store.comments(for: buffer),
+                    activeCommentID: store.selectedCommentID,
+                    collaborators: store.collaborators(for: buffer),
                     onShortcut: handleShortcut,
                     onVisibleLineRangeChange: { lineRange in
                         sourceVisibleLineRange = lineRange
@@ -173,6 +197,10 @@ struct EditorWorkspaceView: View {
             store.toggleTypewriterMode()
         case .toggleMiniMap:
             store.toggleMiniMap()
+        case .toggleCommentsPanel:
+            store.toggleCommentsPanel()
+        case .addComment:
+            store.addCommentToSelection()
         case .transform(let transform):
             store.performTextTransform(transform)
         case .editorCommand(let command):
@@ -351,6 +379,196 @@ private struct EditorMiniMapView: View {
 
     private func lineNumber(at y: CGFloat, height: CGFloat) -> Int {
         EditorMiniMapLayout(lineCount: lines.count, height: height).lineNumber(at: y)
+    }
+}
+
+private struct CommentsPanelView: View {
+    @ObservedObject var store: EditorStore
+    let buffer: EditorBuffer
+
+    private var comments: [DocumentComment] {
+        store.comments(for: buffer)
+    }
+
+    private var canAddComment: Bool {
+        buffer.selectionRanges.contains { $0.length > 0 }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+
+            if comments.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "text.bubble")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                    Text("No comments")
+                        .font(.headline)
+                    Text("Select text and add a comment.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(18)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 10) {
+                            ForEach(comments) { comment in
+                                commentCard(comment)
+                                    .id(comment.id)
+                            }
+                        }
+                        .padding(12)
+                    }
+                    .onChange(of: store.selectedCommentID) { _, commentID in
+                        guard let commentID else { return }
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            proxy.scrollTo(commentID, anchor: .center)
+                        }
+                    }
+                }
+            }
+        }
+        .background(Color(nsColor: .controlBackgroundColor))
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(width: 1)
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "text.bubble")
+                .foregroundStyle(.secondary)
+            Text("Comments")
+                .font(.headline)
+            Spacer()
+            Button {
+                store.addCommentToSelection()
+            } label: {
+                Image(systemName: "plus.bubble")
+                    .frame(width: 22, height: 20)
+            }
+            .buttonStyle(.plain)
+            .disabled(!canAddComment)
+            .help(canAddComment ? "Add comment to selected text" : "Select text to add a comment")
+
+            Button {
+                store.hideCommentsPanel()
+            } label: {
+                Image(systemName: "sidebar.right")
+                    .frame(width: 22, height: 20)
+            }
+            .buttonStyle(.plain)
+            .help("Hide comments")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+
+    private func commentCard(_ comment: DocumentComment) -> some View {
+        let isActive = store.selectedCommentID == comment.id
+
+        return VStack(alignment: .leading, spacing: 8) {
+            Button {
+                store.jumpToComment(comment.id)
+            } label: {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "quote.opening")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(comment.displayQuote)
+                        .lineLimit(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            TextEditor(text: bodyBinding(for: comment.id))
+                .font(.system(size: 13))
+                .scrollContentBackground(.hidden)
+                .frame(minHeight: 58, maxHeight: 110)
+                .padding(5)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                }
+
+            HStack(spacing: 8) {
+                if let reminderAt = comment.reminderAt {
+                    Label(reminderAt.formatted(date: .abbreviated, time: .shortened), systemImage: "bell")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Menu {
+                    ForEach(CommentReminderPreset.allCases) { preset in
+                        Button(preset.title) {
+                            store.scheduleCommentReminder(comment.id, after: preset.interval)
+                        }
+                    }
+                    if comment.reminderAt != nil {
+                        Divider()
+                        Button("Clear Reminder") {
+                            store.clearCommentReminder(comment.id)
+                        }
+                    }
+                } label: {
+                    Image(systemName: comment.reminderAt == nil ? "bell" : "bell.fill")
+                        .frame(width: 22, height: 20)
+                }
+                .menuStyle(.borderlessButton)
+                .help("Remind later")
+
+                Button {
+                    store.resolveComment(comment.id)
+                } label: {
+                    Image(systemName: "checkmark.circle")
+                        .frame(width: 22, height: 20)
+                }
+                .buttonStyle(.plain)
+                .help("Resolve")
+
+                Button {
+                    store.deleteComment(comment.id)
+                } label: {
+                    Image(systemName: "trash")
+                        .frame(width: 22, height: 20)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Delete")
+            }
+        }
+        .padding(10)
+        .background(isActive ? Color.accentColor.opacity(0.14) : Color(nsColor: .textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isActive ? Color.accentColor.opacity(0.46) : Color(nsColor: .separatorColor), lineWidth: 1)
+        }
+    }
+
+    private func bodyBinding(for commentID: UUID) -> Binding<String> {
+        Binding(
+            get: {
+                store.documentComments.first(where: { $0.id == commentID })?.body ?? ""
+            },
+            set: { body in
+                store.updateCommentBody(commentID, body: body)
+            }
+        )
     }
 }
 
@@ -561,6 +779,22 @@ private struct StatusBarView: View {
                 help: "Typewriter mode"
             ) {
                 store.toggleTypewriterMode()
+            }
+
+            StatusIconButton(
+                systemName: "text.bubble",
+                isActive: store.isCommentsPanelVisible,
+                help: "Comments"
+            ) {
+                store.toggleCommentsPanel()
+            }
+
+            StatusIconButton(
+                systemName: "person.2",
+                isActive: store.collaborationSession?.bufferID == buffer.id,
+                help: store.collaborationSession?.statusText ?? "Collaboration"
+            ) {
+                store.showNetworkPanel()
             }
 
             if style.showsPath {

@@ -11,6 +11,9 @@ struct CodeEditorView: NSViewRepresentable {
     var wrapsLines: Bool
     var focusModeEnabled: Bool
     var typewriterModeEnabled: Bool
+    var comments: [DocumentComment] = []
+    var activeCommentID: UUID?
+    var collaborators: [RemoteCollaborator] = []
     var onShortcut: (EditorShortcut) -> Void
     var onVisibleLineRangeChange: (ClosedRange<Int>) -> Void
     var onRegisterEditorCommandHandler: (@escaping (EditorCommand) -> Bool) -> Void
@@ -175,23 +178,72 @@ struct CodeEditorView: NSViewRepresentable {
     }
 
     private func applySyntaxHighlighting(to textView: EditorTextView, language: EditorLanguage, fontSize: CGFloat) {
-        guard textView.needsSyntaxHighlight ||
+        let shouldApplySyntax = textView.needsSyntaxHighlight ||
             textView.highlightedLanguage != language ||
-            textView.highlightedFontSize != fontSize else {
-            return
+            textView.highlightedFontSize != fontSize
+
+        if shouldApplySyntax {
+            let selectionRanges = textView.editorSelectionRanges
+            SyntaxHighlighter.apply(to: textView, language: language, fontSize: fontSize)
+            textView.needsSyntaxHighlight = false
+            textView.highlightedLanguage = language
+            textView.highlightedFontSize = fontSize
+
+            if selectionRanges.count > 1, textView.editorSelectionRanges != selectionRanges {
+                textView.setEditorSelectionRanges(selectionRanges)
+            }
         }
 
-        let selectionRanges = textView.editorSelectionRanges
-        SyntaxHighlighter.apply(to: textView, language: language, fontSize: fontSize)
-        textView.needsSyntaxHighlight = false
-        textView.highlightedLanguage = language
-        textView.highlightedFontSize = fontSize
-
-        if selectionRanges.count > 1, textView.editorSelectionRanges != selectionRanges {
-            textView.setEditorSelectionRanges(selectionRanges)
-        }
-
+        applyCommentHighlights(to: textView)
+        applyCollaboratorHighlights(to: textView)
         textView.updateFocusModeDimming()
+    }
+
+    private func applyCommentHighlights(to textView: EditorTextView) {
+        let nsText = (textView.text ?? "") as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        guard fullRange.length > 0 else { return }
+
+        textView.removeAttribute(.backgroundColor, range: fullRange)
+
+        for comment in comments where !comment.isResolved {
+            let range = textView.normalizedRanges([comment.range.nsRange]).first ?? .notFound
+            guard range.location != NSNotFound, range.length > 0 else { continue }
+
+            let color = comment.id == activeCommentID
+                ? NSColor.controlAccentColor.withAlphaComponent(0.34)
+                : NSColor.systemYellow.withAlphaComponent(0.24)
+            textView.addAttributes([.backgroundColor: color], range: range)
+        }
+    }
+
+    private func applyCollaboratorHighlights(to textView: EditorTextView) {
+        let nsText = (textView.text ?? "") as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        guard fullRange.length > 0 else { return }
+
+        textView.removeAttribute(.underlineColor, range: fullRange)
+        textView.removeAttribute(.underlineStyle, range: fullRange)
+
+        for collaborator in collaborators {
+            let color = collaborator.nsColor.withAlphaComponent(0.28)
+            for selection in collaborator.selectionRanges {
+                let range = textView.normalizedRanges([selection.nsRange]).first ?? .notFound
+                guard range.location != NSNotFound else { continue }
+                if range.length > 0 {
+                    textView.addAttributes([.backgroundColor: color], range: range)
+                } else if range.location < nsText.length {
+                    let caretRange = NSRange(location: range.location, length: 1)
+                    textView.addAttributes(
+                        [
+                            .underlineStyle: NSUnderlineStyle.thick.rawValue,
+                            .underlineColor: collaborator.nsColor
+                        ],
+                        range: caretRange
+                    )
+                }
+            }
+        }
     }
 
     final class Coordinator: NSObject, STTextViewDelegate {
@@ -316,6 +368,37 @@ final class EditorTextView: STTextView {
         window?.makeFirstResponder(self)
     }
 
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event) ?? NSMenu()
+        installAddCommentMenuItem(in: menu)
+        return menu
+    }
+
+    private func installAddCommentMenuItem(in menu: NSMenu) {
+        let action = #selector(addCommentFromContextMenu(_:))
+        if menu.items.contains(where: { $0.action == action }) {
+            return
+        }
+
+        let item = NSMenuItem(title: "Add Comment", action: action, keyEquivalent: "")
+        item.target = self
+        item.isEnabled = editorSelectionRanges.contains { $0.length > 0 }
+
+        let copyIndex = menu.items.firstIndex { $0.action == #selector(NSText.copy(_:)) }
+        let insertionIndex = min((copyIndex.map { $0 + 1 } ?? 0), menu.items.count)
+        if insertionIndex > 0 && insertionIndex < menu.items.count {
+            menu.insertItem(NSMenuItem.separator(), at: insertionIndex)
+            menu.insertItem(item, at: insertionIndex + 1)
+        } else {
+            menu.insertItem(item, at: insertionIndex)
+            menu.insertItem(NSMenuItem.separator(), at: min(insertionIndex + 1, menu.items.count))
+        }
+    }
+
+    @objc private func addCommentFromContextMenu(_ sender: Any?) {
+        _ = shortcutHandler?(.addComment)
+    }
+
     func setEditorSelectionRanges(_ ranges: [NSRange], scrollToLast: Bool = false) {
         let normalized = normalizedRanges(ranges)
         let safeRanges = normalized.isEmpty ? [NSRange(location: 0, length: 0)] : normalized
@@ -402,6 +485,8 @@ final class EditorTextView: STTextView {
             shortcut = .showReplace
         case 2 where flags.contains(.option):
             shortcut = .toggleDocumentCatalog
+        case 8 where flags.contains(.option):
+            shortcut = .addComment
         case 2 where flags.contains(.shift):
             shortcut = .transform(.duplicateLine)
         case 2:
@@ -429,7 +514,7 @@ final class EditorTextView: STTextView {
         case 33:
             shortcut = .editorCommand(.outdentLines)
         case 44:
-            shortcut = .editorCommand(.toggleComment)
+            shortcut = currentLanguage.isMarkdown ? .toggleWysiwygMode : .editorCommand(.toggleComment)
         case 32 where flags.contains(.option) && flags.contains(.shift):
             shortcut = .transform(.uniqueLines)
         case 32 where flags.contains(.shift):

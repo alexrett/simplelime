@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWindow.allowsAutomaticWindowTabbing = false
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        CommentReminderService.shared.activate()
 
         windowObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeMainNotification,

@@ -67,7 +67,7 @@ final class ACPAgentClient: @unchecked Sendable {
                 "clientInfo": [
                     "name": "simplelime",
                     "title": "SimpleLime",
-                    "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.4.0"
+                    "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.5.0"
                 ]
             ]
         )

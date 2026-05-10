@@ -43,6 +43,7 @@ struct NetworkSharePanelView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 localDevice
+                collaborationStatus
 
                 if network.peers.isEmpty {
                     emptyState
@@ -82,6 +83,34 @@ struct NetworkSharePanelView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
+    @ViewBuilder
+    private var collaborationStatus: some View {
+        if let session = store.collaborationSession {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 7) {
+                    Image(systemName: "person.2")
+                        .foregroundStyle(.blue)
+                    Text("Collaboration")
+                        .font(.system(size: 13, weight: .semibold))
+                    Spacer()
+                    Button("Leave") {
+                        store.endCollaboration()
+                    }
+                    .controlSize(.small)
+                }
+
+                Text(session.statusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("No SimpleLime devices found")
@@ -113,6 +142,16 @@ struct NetworkSharePanelView: View {
             Spacer(minLength: 8)
 
             if peer.isTrusted {
+                Button {
+                    store.inviteNetworkPeerToCollaborate(peer.deviceID)
+                } label: {
+                    Image(systemName: "person.2.wave.2")
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.borderless)
+                .disabled(!peer.isAvailable && !peer.isConnected)
+                .help("Invite to collaborate")
+
                 Button {
                     store.sendSelectedBuffer(to: peer.deviceID)
                 } label: {

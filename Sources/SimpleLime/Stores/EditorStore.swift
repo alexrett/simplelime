@@ -95,6 +95,10 @@ final class EditorStore: ObservableObject {
     @Published var pendingCloseBuffer: EditorBuffer?
     @Published var isAIPanelVisible = false
     @Published var isNetworkPanelVisible = false
+    @Published var isCommentsPanelVisible = false
+    @Published private(set) var documentComments: [DocumentComment] = []
+    @Published var selectedCommentID: UUID?
+    @Published var collaborationSession: CollaborationSessionState?
     @Published var aiRunningSessions = Set<UUID>()
     @Published var aiSessionStatuses: [UUID: String] = [:]
 
@@ -104,13 +108,18 @@ final class EditorStore: ObservableObject {
     var onMoveTabBetweenGroups: ((_ sourceGroupID: UUID, _ targetGroupID: UUID, _ bufferID: UUID) -> Void)?
 
     private let persistence: SessionPersistence?
+    private let commentPersistence: DocumentCommentPersistence?
+    private let commentReminderScheduler: CommentReminderScheduling?
     private let aiFileBridge = AIBufferFileBridge()
     private var pendingSaveTask: Task<Void, Never>?
+    private var pendingCommentSaveTask: Task<Void, Never>?
     private var editorCommandHandler: ((EditorCommand) -> Bool)?
     private var aiClients: [UUID: ACPAgentClient] = [:]
     private var aiChatIDsByAgentSession: [String: UUID] = [:]
     private var aiStreamingMessageIDs: [UUID: UUID] = [:]
     private var pendingFileLoadIDs = Set<UUID>()
+    private var openCommentObserver: NSObjectProtocol?
+    private var isApplyingCollaborationUpdate = false
 
     private static let wrapsLinesDefaultsKey = "editor.wrapsLines"
     private static let outlineDefaultsKey = "editor.markdownOutline"
@@ -120,18 +129,50 @@ final class EditorStore: ObservableObject {
     private static let wysiwygModeDefaultsKey = "editor.markdownWysiwyg"
     private static let documentCatalogVisibleDefaultsKey = "editor.documentCatalogVisible"
     private static let documentCatalogRootDefaultsKey = "editor.documentCatalogRoot"
+    private static let collaborationColors: [NSColor] = [
+        .systemBlue,
+        .systemGreen,
+        .systemOrange,
+        .systemPink,
+        .systemPurple,
+        .systemTeal
+    ]
+
+    private static func defaultCommentReminderScheduler() -> CommentReminderScheduling? {
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
+            NSClassFromString("XCTestCase") != nil ||
+            NSClassFromString("XCTest.XCTestCase") != nil {
+            return nil
+        }
+
+        return CommentReminderService.shared
+    }
+
+    private static func defaultCommentPersistence() -> DocumentCommentPersistence? {
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
+            NSClassFromString("XCTestCase") != nil ||
+            NSClassFromString("XCTest.XCTestCase") != nil {
+            return nil
+        }
+
+        return DocumentCommentPersistence()
+    }
 
     init(
         windowGroupID: UUID = UUID(),
         initialBuffers: [EditorBuffer]? = nil,
         selectedID: UUID? = nil,
         persistence: SessionPersistence? = SessionPersistence(),
+        commentPersistence: DocumentCommentPersistence? = nil,
+        commentReminderScheduler: CommentReminderScheduling? = nil,
         networkShare: NetworkShareService = NetworkShareService(),
         autoPersistOnInit: Bool = true,
         registerNetworkReceiver: Bool = true
     ) {
         self.windowGroupID = windowGroupID
         self.persistence = persistence
+        self.commentPersistence = commentPersistence ?? Self.defaultCommentPersistence()
+        self.commentReminderScheduler = commentReminderScheduler ?? Self.defaultCommentReminderScheduler()
         self.networkShare = networkShare
         self.wrapsLines = UserDefaults.standard.object(forKey: Self.wrapsLinesDefaultsKey) as? Bool ?? true
         self.isOutlineVisible = UserDefaults.standard.object(forKey: Self.outlineDefaultsKey) as? Bool ?? false
@@ -157,12 +198,17 @@ final class EditorStore: ObservableObject {
             buffers = loaded.buffers
             selectedBufferID = loaded.selectedID ?? loaded.buffers.first?.id
         }
+        documentComments = commentPersistence?.load() ?? []
 
         normalizeLoadedEditorModeState()
+        installOpenCommentObserver()
 
         if registerNetworkReceiver {
             networkShare.onReceivedNote = { [weak self] note in
                 self?.importSharedNote(note)
+            }
+            networkShare.onReceivedCollaboration = { [weak self] payload in
+                self?.handleCollaborationPayload(payload)
             }
         }
 
@@ -177,7 +223,11 @@ final class EditorStore: ObservableObject {
 
     deinit {
         pendingSaveTask?.cancel()
+        pendingCommentSaveTask?.cancel()
         aiClients.values.forEach { $0.stop() }
+        if let openCommentObserver {
+            NotificationCenter.default.removeObserver(openCommentObserver)
+        }
     }
 
     var selectedBuffer: EditorBuffer? {
@@ -254,6 +304,177 @@ final class EditorStore: ObservableObject {
 
     func showNetworkPanel() {
         isNetworkPanelVisible = true
+    }
+
+    func toggleCommentsPanel() {
+        isCommentsPanelVisible.toggle()
+    }
+
+    func showCommentsPanel() {
+        isCommentsPanelVisible = true
+    }
+
+    func hideCommentsPanel() {
+        isCommentsPanelVisible = false
+    }
+
+    func comments(for buffer: EditorBuffer) -> [DocumentComment] {
+        let key = documentKey(for: buffer)
+        return documentComments
+            .filter { $0.documentKey == key && !$0.isResolved }
+            .sorted {
+                if $0.range.location == $1.range.location {
+                    return $0.createdAt < $1.createdAt
+                }
+                return $0.range.location < $1.range.location
+            }
+    }
+
+    var selectedBufferComments: [DocumentComment] {
+        guard let selectedBuffer else { return [] }
+        return comments(for: selectedBuffer)
+    }
+
+    var selectedComment: DocumentComment? {
+        guard let selectedCommentID else { return nil }
+        return documentComments.first { $0.id == selectedCommentID }
+    }
+
+    @discardableResult
+    func addCommentToSelection(body: String = "") -> DocumentComment? {
+        guard let selectedIndex else { return nil }
+        let buffer = buffers[selectedIndex]
+        let ranges = normalizedNonEmptyRanges(buffer.selectionRanges, in: buffer.text)
+        guard let range = ranges.first else {
+            isCommentsPanelVisible = true
+            lastError = "Select text before adding a comment."
+            return nil
+        }
+
+        return addComment(to: range, in: buffer.id, body: body)
+    }
+
+    @discardableResult
+    func addComment(to rawRange: TextRange, in bufferID: UUID, body: String = "") -> DocumentComment? {
+        guard let index = buffers.firstIndex(where: { $0.id == bufferID }) else { return nil }
+        let buffer = buffers[index]
+        guard let range = normalizedNonEmptyRanges([rawRange], in: buffer.text).first else { return nil }
+
+        let quote = (buffer.text as NSString).substring(with: range.nsRange)
+        let now = Date()
+        let comment = DocumentComment(
+            documentKey: documentKey(for: buffer),
+            range: range,
+            quote: quote,
+            body: body,
+            createdAt: now,
+            updatedAt: now
+        )
+
+        documentComments.append(comment)
+        selectedCommentID = comment.id
+        buffers[index].selectionRanges = [range]
+        isCommentsPanelVisible = true
+        persistCommentsSoon()
+        persistSoon()
+        return comment
+    }
+
+    func selectComment(_ commentID: UUID) {
+        selectedCommentID = commentID
+    }
+
+    func jumpToComment(_ commentID: UUID) {
+        guard let comment = documentComments.first(where: { $0.id == commentID }) else { return }
+
+        selectedCommentID = commentID
+        isCommentsPanelVisible = true
+
+        if let index = buffers.firstIndex(where: { documentKey(for: $0) == comment.documentKey }) {
+            selectedBufferID = buffers[index].id
+            buffers[index].selectionRanges = [normalizedRange(comment.range, in: buffers[index].text)]
+            persistSoon()
+            return
+        }
+
+        guard let filePath = filePath(fromDocumentKey: comment.documentKey) else { return }
+
+        do {
+            let url = URL(fileURLWithPath: filePath)
+            var encoding = String.Encoding.utf8
+            let text = try String(contentsOf: url, usedEncoding: &encoding)
+            let now = Date()
+            let buffer = EditorBuffer(
+                id: UUID(),
+                title: url.lastPathComponent,
+                kind: .file,
+                filePath: filePath,
+                text: text,
+                language: EditorLanguage.detect(fileName: url.lastPathComponent, text: text),
+                createdAt: now,
+                updatedAt: now,
+                isDirty: false,
+                selectionRanges: [normalizedRange(comment.range, in: text)]
+            )
+            buffers.append(buffer)
+            selectedBufferID = buffer.id
+            persistSoon()
+        } catch {
+            lastError = "Could not open commented document: \(error.localizedDescription)"
+        }
+    }
+
+    func updateCommentBody(_ commentID: UUID, body: String) {
+        guard let index = documentComments.firstIndex(where: { $0.id == commentID }),
+              documentComments[index].body != body else {
+            return
+        }
+
+        documentComments[index].body = body
+        documentComments[index].updatedAt = Date()
+        persistCommentsSoon()
+    }
+
+    func resolveComment(_ commentID: UUID) {
+        guard let index = documentComments.firstIndex(where: { $0.id == commentID }) else { return }
+
+        documentComments[index].resolvedAt = Date()
+        documentComments[index].updatedAt = Date()
+        documentComments[index].reminderAt = nil
+        if selectedCommentID == commentID {
+            selectedCommentID = nil
+        }
+        commentReminderScheduler?.cancelReminder(commentID: commentID)
+        persistCommentsSoon()
+    }
+
+    func deleteComment(_ commentID: UUID) {
+        guard let index = documentComments.firstIndex(where: { $0.id == commentID }) else { return }
+
+        documentComments.remove(at: index)
+        if selectedCommentID == commentID {
+            selectedCommentID = nil
+        }
+        commentReminderScheduler?.cancelReminder(commentID: commentID)
+        persistCommentsSoon()
+    }
+
+    func scheduleCommentReminder(_ commentID: UUID, after interval: TimeInterval) {
+        guard let index = documentComments.firstIndex(where: { $0.id == commentID }) else { return }
+
+        documentComments[index].reminderAt = Date().addingTimeInterval(interval)
+        documentComments[index].updatedAt = Date()
+        commentReminderScheduler?.scheduleReminder(for: documentComments[index])
+        persistCommentsSoon()
+    }
+
+    func clearCommentReminder(_ commentID: UUID) {
+        guard let index = documentComments.firstIndex(where: { $0.id == commentID }) else { return }
+
+        documentComments[index].reminderAt = nil
+        documentComments[index].updatedAt = Date()
+        commentReminderScheduler?.cancelReminder(commentID: commentID)
+        persistCommentsSoon()
     }
 
     func selectedAIChatSession(in bufferID: UUID) -> AIChatSession? {
@@ -472,9 +693,12 @@ final class EditorStore: ObservableObject {
             return
         }
 
+        let previousText = buffers[index].text
         buffers[index].text = text
         buffers[index].updatedAt = Date()
         buffers[index].isDirty = buffers[index].kind == .scratch ? !text.isEmpty : true
+        reanchorComments(for: buffers[index], newText: text)
+        sendCollaborationPatchIfNeeded(bufferID: id, oldText: previousText, newText: text)
         persistSoon()
     }
 
@@ -490,6 +714,7 @@ final class EditorStore: ObservableObject {
         guard buffers[index].selectionRanges != normalized else { return }
         buffers[index].selectionRanges = normalized
         buffers[index].updatedAt = Date()
+        sendCollaborationSelectionIfNeeded(bufferID: id, selectionRanges: normalized)
         persistSoon()
     }
 
@@ -701,8 +926,85 @@ final class EditorStore: ObservableObject {
         networkShare.send(note: note, to: deviceID)
     }
 
+    func inviteNetworkPeerToCollaborate(_ deviceID: String) {
+        guard let selectedBuffer else { return }
+        let peer = networkShare.peers.first { $0.deviceID == deviceID }
+        guard peer?.isTrusted == true else {
+            lastError = "Pair this device before starting collaboration."
+            return
+        }
+
+        var session = collaborationSessionFor(buffer: selectedBuffer, isHost: true)
+        upsertCollaborator(
+            deviceID: deviceID,
+            name: peer?.name ?? "Remote Mac",
+            selectionRanges: [],
+            in: &session
+        )
+        collaborationSession = session
+        isNetworkPanelVisible = true
+
+        networkShare.send(
+            collaboration: collaborationPayload(
+                kind: .invite,
+                session: session,
+                buffer: selectedBuffer,
+                text: selectedBuffer.text,
+                patch: nil,
+                selectionRanges: selectedBuffer.selectionRanges
+            ),
+            to: deviceID
+        )
+    }
+
+    func endCollaboration() {
+        guard let session = collaborationSession,
+              let buffer = buffers.first(where: { $0.id == session.bufferID }) else {
+            collaborationSession = nil
+            return
+        }
+
+        let payload = collaborationPayload(
+            kind: .leave,
+            session: session,
+            buffer: buffer,
+            text: nil,
+            patch: nil,
+            selectionRanges: buffer.selectionRanges
+        )
+        session.collaborators.forEach { collaborator in
+            networkShare.send(collaboration: payload, to: collaborator.deviceID)
+        }
+        collaborationSession = nil
+        networkShare.statusMessage = "Collaboration ended. Your local copy remains open."
+    }
+
     func removeTrustedNetworkDevice(_ deviceID: String) {
         networkShare.removeTrustedDevice(deviceID)
+    }
+
+    func collaborators(for buffer: EditorBuffer) -> [RemoteCollaborator] {
+        guard collaborationSession?.bufferID == buffer.id else { return [] }
+        return collaborationSession?.collaborators ?? []
+    }
+
+    func canHandleCollaborationPayload(_ payload: CollaborationPayload) -> Bool {
+        collaborationSession?.id == payload.sessionID
+    }
+
+    func handleCollaborationPayload(_ payload: CollaborationPayload) {
+        switch payload.kind {
+        case .invite:
+            joinCollaboration(from: payload)
+        case .accept:
+            acceptCollaboration(from: payload)
+        case .patch:
+            applyCollaborationPatch(from: payload)
+        case .selection:
+            updateRemoteCollaborator(from: payload)
+        case .leave:
+            removeRemoteCollaborator(from: payload)
+        }
     }
 
     func importSharedNote(_ note: SharedNotePayload) {
@@ -728,6 +1030,287 @@ final class EditorStore: ObservableObject {
         buffers.append(buffer)
         selectedBufferID = buffer.id
         persistSoon()
+    }
+
+    private func collaborationSessionFor(buffer: EditorBuffer, isHost: Bool) -> CollaborationSessionState {
+        if let session = collaborationSession, session.bufferID == buffer.id {
+            return session
+        }
+
+        return CollaborationSessionState(
+            id: UUID(),
+            bufferID: buffer.id,
+            title: buffer.displayTitle,
+            localRevision: 0,
+            isHost: isHost,
+            startedAt: Date(),
+            collaborators: []
+        )
+    }
+
+    private func upsertCollaborator(
+        deviceID: String,
+        name: String,
+        selectionRanges: [TextRange],
+        in session: inout CollaborationSessionState
+    ) {
+        guard deviceID != networkShare.localDeviceID else { return }
+        let resolvedSelection = selectionRanges.isEmpty ? [.zero] : selectionRanges
+
+        if let index = session.collaborators.firstIndex(where: { $0.deviceID == deviceID }) {
+            session.collaborators[index].name = name
+            session.collaborators[index].selectionRanges = resolvedSelection
+            session.collaborators[index].lastSeenAt = Date()
+        } else {
+            let colorIndex = abs(deviceID.hashValue) % Self.collaborationColors.count
+            session.collaborators.append(
+                RemoteCollaborator(
+                    deviceID: deviceID,
+                    name: name,
+                    selectionRanges: resolvedSelection,
+                    colorIndex: colorIndex,
+                    lastSeenAt: Date()
+                )
+            )
+        }
+    }
+
+    private func collaborationPayload(
+        kind: CollaborationMessageKind,
+        session: CollaborationSessionState,
+        buffer: EditorBuffer,
+        text: String?,
+        patch: CollaborationTextPatch?,
+        selectionRanges: [TextRange]
+    ) -> CollaborationPayload {
+        CollaborationPayload(
+            kind: kind,
+            sessionID: session.id,
+            title: buffer.displayTitle,
+            text: text,
+            language: buffer.language,
+            patch: patch,
+            selectionRanges: selectionRanges,
+            revision: session.localRevision,
+            sentAt: Date(),
+            sourceDeviceID: networkShare.localDeviceID,
+            sourceDeviceName: networkShare.localDisplayName,
+            sourceToken: nil
+        )
+    }
+
+    private func sendCollaborationPatchIfNeeded(bufferID: UUID, oldText: String, newText: String) {
+        guard !isApplyingCollaborationUpdate,
+              var session = collaborationSession,
+              session.bufferID == bufferID,
+              !session.collaborators.isEmpty,
+              let index = buffers.firstIndex(where: { $0.id == bufferID }),
+              let patch = CollaborationTextPatch.make(oldText: oldText, newText: newText) else {
+            return
+        }
+
+        session.localRevision += 1
+        collaborationSession = session
+        let buffer = buffers[index]
+        let payload = collaborationPayload(
+            kind: .patch,
+            session: session,
+            buffer: buffer,
+            text: nil,
+            patch: patch,
+            selectionRanges: buffer.selectionRanges
+        )
+        session.collaborators.forEach { collaborator in
+            networkShare.send(collaboration: payload, to: collaborator.deviceID)
+        }
+    }
+
+    private func sendCollaborationSelectionIfNeeded(bufferID: UUID, selectionRanges: [TextRange]) {
+        guard !isApplyingCollaborationUpdate,
+              let session = collaborationSession,
+              session.bufferID == bufferID,
+              !session.collaborators.isEmpty,
+              let buffer = buffers.first(where: { $0.id == bufferID }) else {
+            return
+        }
+
+        let payload = collaborationPayload(
+            kind: .selection,
+            session: session,
+            buffer: buffer,
+            text: nil,
+            patch: nil,
+            selectionRanges: selectionRanges
+        )
+        session.collaborators.forEach { collaborator in
+            networkShare.send(collaboration: payload, to: collaborator.deviceID)
+        }
+    }
+
+    private func joinCollaboration(from payload: CollaborationPayload) {
+        guard let text = payload.text else { return }
+        let now = Date()
+        let title = uniqueSharedTitle(payload.title.isEmpty ? "Collaborative Note" : payload.title)
+        let buffer = EditorBuffer(
+            id: UUID(),
+            title: title,
+            kind: .scratch,
+            filePath: nil,
+            text: text,
+            language: payload.language ?? .markdown,
+            createdAt: now,
+            updatedAt: now,
+            isDirty: !text.isEmpty,
+            selectionRanges: [.zero],
+            aiSessions: [],
+            selectedAIChatSessionID: nil
+        )
+
+        buffers.append(buffer)
+        selectedBufferID = buffer.id
+
+        var session = CollaborationSessionState(
+            id: payload.sessionID,
+            bufferID: buffer.id,
+            title: title,
+            localRevision: payload.revision,
+            isHost: false,
+            startedAt: now,
+            collaborators: []
+        )
+        upsertCollaborator(
+            deviceID: payload.collaboratorDeviceID,
+            name: payload.collaboratorName,
+            selectionRanges: payload.selectionRanges,
+            in: &session
+        )
+        collaborationSession = session
+        isNetworkPanelVisible = true
+
+        let response = collaborationPayload(
+            kind: .accept,
+            session: session,
+            buffer: buffer,
+            text: nil,
+            patch: nil,
+            selectionRanges: buffer.selectionRanges
+        )
+        networkShare.send(collaboration: response, to: payload.sourceDeviceID)
+        persistSoon()
+    }
+
+    private func acceptCollaboration(from payload: CollaborationPayload) {
+        guard var session = collaborationSession,
+              session.id == payload.sessionID else {
+            return
+        }
+
+        upsertCollaborator(
+            deviceID: payload.collaboratorDeviceID,
+            name: payload.collaboratorName,
+            selectionRanges: payload.selectionRanges,
+            in: &session
+        )
+        collaborationSession = session
+        isNetworkPanelVisible = true
+    }
+
+    private func applyCollaborationPatch(from payload: CollaborationPayload) {
+        guard var session = collaborationSession,
+              session.id == payload.sessionID,
+              let patch = payload.patch,
+              let index = buffers.firstIndex(where: { $0.id == session.bufferID }) else {
+            return
+        }
+
+        let oldText = buffers[index].text
+        let newText = patch.apply(to: oldText)
+        guard oldText != newText else {
+            updateRemoteCollaborator(from: payload)
+            return
+        }
+
+        isApplyingCollaborationUpdate = true
+        buffers[index].text = newText
+        buffers[index].updatedAt = Date()
+        buffers[index].isDirty = buffers[index].kind == .scratch ? !newText.isEmpty : true
+        reanchorComments(for: buffers[index], newText: newText)
+        upsertCollaborator(
+            deviceID: payload.collaboratorDeviceID,
+            name: payload.collaboratorName,
+            selectionRanges: payload.selectionRanges,
+            in: &session
+        )
+        session.localRevision = max(session.localRevision + 1, payload.revision)
+        collaborationSession = session
+        isApplyingCollaborationUpdate = false
+        relayCollaborationPayloadIfHost(payload, session: session, buffer: buffers[index])
+        persistSoon()
+    }
+
+    private func updateRemoteCollaborator(from payload: CollaborationPayload) {
+        guard var session = collaborationSession,
+              session.id == payload.sessionID else {
+            return
+        }
+
+        upsertCollaborator(
+            deviceID: payload.collaboratorDeviceID,
+            name: payload.collaboratorName,
+            selectionRanges: payload.selectionRanges,
+            in: &session
+        )
+        collaborationSession = session
+        if let buffer = buffers.first(where: { $0.id == session.bufferID }) {
+            relayCollaborationPayloadIfHost(payload, session: session, buffer: buffer)
+        }
+    }
+
+    private func removeRemoteCollaborator(from payload: CollaborationPayload) {
+        guard var session = collaborationSession,
+              session.id == payload.sessionID else {
+            return
+        }
+
+        session.collaborators.removeAll { $0.deviceID == payload.collaboratorDeviceID }
+        collaborationSession = session.collaborators.isEmpty ? nil : session
+        if let buffer = buffers.first(where: { $0.id == session.bufferID }) {
+            relayCollaborationPayloadIfHost(payload, session: session, buffer: buffer)
+        }
+        networkShare.statusMessage = "\(payload.collaboratorName) left collaboration. Your local copy remains open."
+    }
+
+    private func relayCollaborationPayloadIfHost(
+        _ payload: CollaborationPayload,
+        session: CollaborationSessionState,
+        buffer: EditorBuffer
+    ) {
+        guard session.isHost else { return }
+
+        switch payload.kind {
+        case .patch, .selection, .leave:
+            break
+        case .invite, .accept:
+            return
+        }
+
+        let actorDeviceID = payload.collaboratorDeviceID
+        var relayed = payload
+        relayed.title = buffer.displayTitle
+        relayed.language = buffer.language
+        relayed.revision = session.localRevision
+        relayed.sentAt = Date()
+        relayed.sourceDeviceID = networkShare.localDeviceID
+        relayed.sourceDeviceName = networkShare.localDisplayName
+        relayed.sourceToken = nil
+        relayed.actorDeviceID = actorDeviceID
+        relayed.actorDeviceName = payload.collaboratorName
+
+        for collaborator in session.collaborators
+            where collaborator.deviceID != actorDeviceID &&
+                collaborator.deviceID != payload.sourceDeviceID {
+            networkShare.send(collaboration: relayed, to: collaborator.deviceID)
+        }
     }
 
     private func uniqueSharedTitle(_ title: String) -> String {
@@ -768,6 +1351,7 @@ final class EditorStore: ObservableObject {
     func persistNow() {
         pendingSaveTask?.cancel()
         pendingSaveTask = nil
+        persistCommentsNow()
 
         if let onPersistRequested {
             onPersistRequested()
@@ -790,6 +1374,43 @@ final class EditorStore: ObservableObject {
             try? await Task.sleep(nanoseconds: 250_000_000)
             await MainActor.run {
                 self?.persistNow()
+            }
+        }
+    }
+
+    func persistCommentsNow() {
+        pendingCommentSaveTask?.cancel()
+        pendingCommentSaveTask = nil
+
+        guard let commentPersistence else { return }
+
+        do {
+            try commentPersistence.save(documentComments)
+        } catch {
+            lastError = "Could not persist comments: \(error.localizedDescription)"
+        }
+    }
+
+    private func persistCommentsSoon() {
+        pendingCommentSaveTask?.cancel()
+
+        pendingCommentSaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            await MainActor.run {
+                self?.persistCommentsNow()
+            }
+        }
+    }
+
+    private func installOpenCommentObserver() {
+        openCommentObserver = NotificationCenter.default.addObserver(
+            forName: .simpleLimeOpenComment,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let commentID = notification.userInfo?["commentID"] as? UUID else { return }
+            Task { @MainActor in
+                self?.jumpToComment(commentID)
             }
         }
     }
@@ -997,6 +1618,7 @@ final class EditorStore: ObservableObject {
         buffers[selectedIndex].isDirty = true
         buffers[selectedIndex].updatedAt = Date()
         buffers[selectedIndex].selectionRanges = [replacement.firstSelection]
+        reanchorComments(for: buffers[selectedIndex], newText: replacement.text)
         persistSoon()
     }
 
@@ -1030,6 +1652,7 @@ final class EditorStore: ObservableObject {
             buffers[index].isDirty = true
             buffers[index].updatedAt = Date()
             buffers[index].selectionRanges = [replacement.firstSelection]
+            reanchorComments(for: buffers[index], newText: replacement.text)
             replacementCount += replacement.count
             changedDocumentCount += 1
 
@@ -1468,6 +2091,7 @@ final class EditorStore: ObservableObject {
         buffers[index].text = content
         buffers[index].updatedAt = Date()
         buffers[index].isDirty = buffers[index].kind == .scratch ? !content.isEmpty : true
+        reanchorComments(for: buffers[index], newText: content)
 
         try? aiFileBridge.mirror(buffers[index])
 
@@ -1486,6 +2110,7 @@ final class EditorStore: ObservableObject {
         buffers[index].text = mirroredText
         buffers[index].updatedAt = Date()
         buffers[index].isDirty = buffers[index].kind == .scratch ? !mirroredText.isEmpty : true
+        reanchorComments(for: buffers[index], newText: mirroredText)
         aiSessionStatuses[chatID] = "Applied edits to the current tab"
         persistSoon()
         return true
@@ -1584,6 +2209,7 @@ final class EditorStore: ObservableObject {
 
     private func saveBuffer(at index: Int, to url: URL) {
         do {
+            let oldDocumentKey = documentKey(for: buffers[index])
             try buffers[index].text.write(to: url, atomically: true, encoding: .utf8)
             buffers[index].kind = .file
             buffers[index].filePath = url.path
@@ -1591,6 +2217,7 @@ final class EditorStore: ObservableObject {
             buffers[index].language = EditorLanguage.detect(fileName: url.lastPathComponent, text: buffers[index].text)
             buffers[index].updatedAt = Date()
             buffers[index].isDirty = false
+            rekeyComments(from: oldDocumentKey, to: documentKey(for: buffers[index]))
             persistSoon()
         } catch {
             lastError = "Could not save \(url.lastPathComponent): \(error.localizedDescription)"
@@ -2097,10 +2724,12 @@ final class EditorStore: ObservableObject {
             newSelections.append(TextRange(location: range.location, length: replacement.utf16.count))
         }
 
-        buffers[selectedIndex].text = mutable as String
+        let updatedText = mutable as String
+        buffers[selectedIndex].text = updatedText
         buffers[selectedIndex].selectionRanges = newSelections.reversed()
         buffers[selectedIndex].isDirty = true
         buffers[selectedIndex].updatedAt = Date()
+        reanchorComments(for: buffers[selectedIndex], newText: updatedText)
         persistSoon()
     }
 
@@ -2124,11 +2753,96 @@ final class EditorStore: ObservableObject {
         let mutable = NSMutableString(string: buffer.text)
         mutable.insert(insertion, at: lineRange.location + lineRange.length)
 
-        buffers[selectedIndex].text = mutable as String
+        let updatedText = mutable as String
+        buffers[selectedIndex].text = updatedText
         buffers[selectedIndex].selectionRanges = [TextRange(location: lineRange.location + lineRange.length, length: insertion.utf16.count)]
         buffers[selectedIndex].isDirty = true
         buffers[selectedIndex].updatedAt = Date()
+        reanchorComments(for: buffers[selectedIndex], newText: updatedText)
         persistSoon()
+    }
+
+    private func documentKey(for buffer: EditorBuffer) -> String {
+        if let path = buffer.filePath {
+            return "file:\(fileIdentity(forPath: path))"
+        }
+
+        return "scratch:\(buffer.id.uuidString)"
+    }
+
+    private func filePath(fromDocumentKey documentKey: String) -> String? {
+        guard documentKey.hasPrefix("file:") else { return nil }
+        return String(documentKey.dropFirst("file:".count))
+    }
+
+    private func normalizedRange(_ range: TextRange, in text: String) -> TextRange {
+        normalizedRanges([range], in: text).first ?? .zero
+    }
+
+    private func rekeyComments(from oldKey: String, to newKey: String) {
+        guard oldKey != newKey else { return }
+
+        var changed = false
+        for index in documentComments.indices where documentComments[index].documentKey == oldKey {
+            documentComments[index].documentKey = newKey
+            documentComments[index].updatedAt = Date()
+            changed = true
+        }
+
+        if changed {
+            persistCommentsSoon()
+        }
+    }
+
+    private func reanchorComments(for buffer: EditorBuffer, newText: String) {
+        let key = documentKey(for: buffer)
+        guard documentComments.contains(where: { $0.documentKey == key && !$0.isResolved }) else { return }
+
+        let nsNewText = newText as NSString
+        var changed = false
+
+        for index in documentComments.indices where documentComments[index].documentKey == key && !documentComments[index].isResolved {
+            let comment = documentComments[index]
+            let normalized = normalizedRange(comment.range, in: newText)
+
+            if normalized.length > 0,
+               normalized.location + normalized.length <= nsNewText.length,
+               nsNewText.substring(with: normalized.nsRange) == comment.quote {
+                if normalized != comment.range {
+                    documentComments[index].range = normalized
+                    documentComments[index].updatedAt = Date()
+                    changed = true
+                }
+                continue
+            }
+
+            if !comment.quote.isEmpty {
+                let found = nsNewText.range(of: comment.quote)
+                if found.location != NSNotFound {
+                    let updatedRange = TextRange(found)
+                    if updatedRange != comment.range {
+                        documentComments[index].range = updatedRange
+                        documentComments[index].updatedAt = Date()
+                        changed = true
+                    }
+                    continue
+                }
+            }
+
+            let fallback = TextRange(
+                location: min(max(0, normalized.location), nsNewText.length),
+                length: min(normalized.length, max(0, nsNewText.length - normalized.location))
+            )
+            if fallback != comment.range {
+                documentComments[index].range = fallback
+                documentComments[index].updatedAt = Date()
+                changed = true
+            }
+        }
+
+        if changed {
+            persistCommentsSoon()
+        }
     }
 
     private func normalizedRanges(_ ranges: [TextRange], in text: String) -> [TextRange] {

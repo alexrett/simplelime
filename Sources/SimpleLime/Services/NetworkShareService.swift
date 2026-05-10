@@ -21,6 +21,8 @@ final class NetworkShareService: NSObject, ObservableObject {
     private let localPairingToken: String
 
     var onReceivedNote: ((SharedNotePayload) -> Void)?
+    var onReceivedCollaboration: ((CollaborationPayload) -> Void)?
+    var collaborationSendInterceptor: ((CollaborationPayload, String) -> Bool)?
 
     private let userDefaults: UserDefaults
     private let localPeerID: MCPeerID
@@ -33,8 +35,9 @@ final class NetworkShareService: NSObject, ObservableObject {
     private var pendingInvitationHandler: ((Bool, MCSession?) -> Void)?
     private var outgoingPairDeviceIDs = Set<String>()
     private var pendingNotesByDeviceID: [String: SharedNotePayload] = [:]
+    private var pendingCollaborationsByDeviceID: [String: [CollaborationPayload]] = [:]
 
-    init(userDefaults: UserDefaults = .standard) {
+    init(userDefaults: UserDefaults = .standard, startNetworkServices: Bool = true) {
         self.userDefaults = userDefaults
 
         let storedDeviceID = userDefaults.string(forKey: Self.localDeviceIDKey)
@@ -71,8 +74,10 @@ final class NetworkShareService: NSObject, ObservableObject {
         session.delegate = self
         advertiser.delegate = self
         browser.delegate = self
-        advertiser.startAdvertisingPeer()
-        browser.startBrowsingForPeers()
+        if startNetworkServices {
+            advertiser.startAdvertisingPeer()
+            browser.startBrowsingForPeers()
+        }
         refreshPeers()
     }
 
@@ -123,6 +128,26 @@ final class NetworkShareService: NSObject, ObservableObject {
         refreshPeers()
     }
 
+    func seedTrustedPeerForTesting(
+        deviceID: String,
+        name: String,
+        isAvailable: Bool = true,
+        isConnected: Bool = false,
+        token: String? = "test-token"
+    ) {
+        addTrustedDevice(id: deviceID, name: name, token: token)
+        let peerID = MCPeerID(displayName: name)
+        discoveredPeers[deviceID] = DiscoveredPeer(
+            peerID: peerID,
+            deviceID: deviceID,
+            name: name,
+            isAvailable: isAvailable,
+            isConnected: isConnected
+        )
+        deviceIDsByPeerID[peerID] = deviceID
+        refreshPeers()
+    }
+
     func send(note: SharedNotePayload, to deviceID: String) {
         guard isTrusted(deviceID) else {
             statusMessage = "Pair this device first."
@@ -143,6 +168,41 @@ final class NetworkShareService: NSObject, ObservableObject {
         }
 
         pendingNotesByDeviceID[deviceID] = trustedNote
+        browser.invitePeer(
+            peer.peerID,
+            to: session,
+            withContext: encodeInvitation(type: "trustedConnect"),
+            timeout: 20
+        )
+        statusMessage = "Connecting to \(peer.name)..."
+    }
+
+    func send(collaboration payload: CollaborationPayload, to deviceID: String) {
+        guard isTrusted(deviceID) else {
+            statusMessage = "Pair this device first."
+            return
+        }
+
+        guard let peer = discoveredPeers[deviceID], peer.isAvailable || peer.isConnected else {
+            statusMessage = "Trusted device is offline."
+            return
+        }
+
+        var trustedPayload = payload
+        trustedPayload.sourceToken = localPairingToken
+
+        if let collaborationSendInterceptor,
+           collaborationSendInterceptor(trustedPayload, deviceID) {
+            statusMessage = collaborationStatus(for: trustedPayload.kind, peerName: peer.name)
+            return
+        }
+
+        if peer.isConnected {
+            sendNow(collaboration: trustedPayload, to: peer)
+            return
+        }
+
+        pendingCollaborationsByDeviceID[deviceID, default: []].append(trustedPayload)
         browser.invitePeer(
             peer.peerID,
             to: session,
@@ -243,6 +303,12 @@ final class NetworkShareService: NSObject, ObservableObject {
                let peer = discoveredPeers[deviceID] {
                 sendNow(note: note, to: peer)
             }
+
+            if isTrusted(deviceID),
+               let pending = pendingCollaborationsByDeviceID.removeValue(forKey: deviceID),
+               let peer = discoveredPeers[deviceID] {
+                pending.forEach { sendNow(collaboration: $0, to: peer) }
+            }
         }
 
         refreshPeers()
@@ -252,6 +318,16 @@ final class NetworkShareService: NSObject, ObservableObject {
         if let control = try? JSONDecoder.networkDecoder.decode(NetworkControlPayload.self, from: data),
            control.type == "pairAck" {
             handlePairAck(control, from: peerID)
+            return
+        }
+
+        if let collaboration = try? JSONDecoder.networkDecoder.decode(CollaborationPayload.self, from: data),
+           collaboration.type == "collaboration",
+           let peerDeviceID = deviceIDsByPeerID[peerID],
+           peerDeviceID == collaboration.sourceDeviceID,
+           isTrusted(peerDeviceID, token: collaboration.sourceToken) {
+            onReceivedCollaboration?(collaboration)
+            statusMessage = "Received collaboration update from \(collaboration.sourceDeviceName)."
             return
         }
 
@@ -292,6 +368,31 @@ final class NetworkShareService: NSObject, ObservableObject {
             statusMessage = "Sent \(note.title) to \(peer.name)."
         } catch {
             statusMessage = "Could not send note: \(error.localizedDescription)"
+        }
+    }
+
+    private func sendNow(collaboration payload: CollaborationPayload, to peer: DiscoveredPeer) {
+        do {
+            let data = try JSONEncoder.networkEncoder.encode(payload)
+            try session.send(data, toPeers: [peer.peerID], with: .reliable)
+            statusMessage = collaborationStatus(for: payload.kind, peerName: peer.name)
+        } catch {
+            statusMessage = "Could not send collaboration update: \(error.localizedDescription)"
+        }
+    }
+
+    private func collaborationStatus(for kind: CollaborationMessageKind, peerName: String) -> String {
+        switch kind {
+        case .invite:
+            return "Invited \(peerName) to collaborate."
+        case .accept:
+            return "Joined collaboration with \(peerName)."
+        case .patch:
+            return "Synced edit with \(peerName)."
+        case .selection:
+            return "Synced cursor with \(peerName)."
+        case .leave:
+            return "Left collaboration with \(peerName)."
         }
     }
 

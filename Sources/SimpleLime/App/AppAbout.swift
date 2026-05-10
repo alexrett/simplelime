@@ -1,7 +1,7 @@
 import AppKit
 
 enum AppAbout {
-    static let version = "0.4.0"
+    static let version = "0.5.0"
     static let build = "1"
     static let description = "Scratch-first text editor for temporary notes, Markdown, and code."
 

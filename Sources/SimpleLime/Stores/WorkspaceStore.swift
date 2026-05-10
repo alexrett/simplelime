@@ -30,6 +30,9 @@ final class WorkspaceStore: ObservableObject {
         networkShare.onReceivedNote = { [weak self] note in
             self?.importSharedNote(note)
         }
+        networkShare.onReceivedCollaboration = { [weak self] payload in
+            self?.handleCollaborationPayload(payload)
+        }
         installOpenURLObserver()
 
         DispatchQueue.main.async { [weak self] in
@@ -139,6 +142,16 @@ final class WorkspaceStore: ObservableObject {
         store?.importSharedNote(note)
     }
 
+    func handleCollaborationPayload(_ payload: CollaborationPayload) {
+        if let store = groups.map(\.store).first(where: { $0.canHandleCollaborationPayload(payload) }) {
+            store.handleCollaborationPayload(payload)
+            return
+        }
+
+        let store = activeStore ?? groups.first?.store
+        store?.handleCollaborationPayload(payload)
+    }
+
     func prepareForTermination() {
         isTerminating = true
     }
@@ -146,6 +159,7 @@ final class WorkspaceStore: ObservableObject {
     func persistNow() {
         pendingSaveTask?.cancel()
         pendingSaveTask = nil
+        groups.forEach { $0.store.persistCommentsNow() }
 
         do {
             try persistence.save(

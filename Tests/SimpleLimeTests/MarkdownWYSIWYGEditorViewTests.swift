@@ -215,6 +215,166 @@ final class MarkdownWYSIWYGEditorViewTests: XCTestCase {
         XCTAssertEqual(offset, 8)
     }
 
+    func testWysiwygSelectionReportsMarkdownRangeLengthForComments() async throws {
+        let webView = try await makeWebView(markdown: "Hello world")
+
+        try await evaluate("window.simplelimeTest.selectText('p', 6, 11);", in: webView)
+        let location = try await evaluateInt("window.simplelimeTest.selectionTextRange().location;", in: webView)
+        let length = try await evaluateInt("window.simplelimeTest.selectionTextRange().length;", in: webView)
+
+        XCTAssertEqual(location, 6)
+        XCTAssertEqual(length, 5)
+    }
+
+    func testWysiwygSelectionRangeMeasurementDoesNotLeakCaretTokenIntoHeading() async throws {
+        let webView = try await makeWebView(markdown: "## Images")
+
+        try await evaluate("window.simplelimeTest.selectText('h2', 0, 6);", in: webView)
+        let location = try await evaluateInt("window.simplelimeTest.selectionTextRange().location;", in: webView)
+        let length = try await evaluateInt("window.simplelimeTest.selectionTextRange().length;", in: webView)
+
+        let html = try await evaluateString("window.simplelimeTest.editorHTML();", in: webView)
+        let markdown = try await evaluateString("window.simplelimeTest.currentMarkdown();", in: webView)
+
+        XCTAssertEqual(location, 3)
+        XCTAssertEqual(length, 6)
+        XCTAssertFalse(html.contains("simplelime-caret"), html)
+        XCTAssertEqual(markdown, "## Images")
+    }
+
+    func testWysiwygCommentHighlightsRenderWithoutChangingMarkdown() async throws {
+        let comment = DocumentComment(
+            documentKey: "scratch:test",
+            range: SimpleLime.TextRange(location: 6, length: 6),
+            quote: "marked"
+        )
+        let webView = try await makeWebView(markdown: "Hello marked text", comments: [comment], activeCommentID: comment.id)
+
+        let count = try await evaluateInt("window.simplelimeTest.commentHighlightCount();", in: webView)
+        let highlightedText = try await evaluateString(
+            "document.querySelector('.comment-highlight.is-active')?.textContent || '';",
+            in: webView
+        )
+        let markdown = try await evaluateString("window.simplelimeTest.currentMarkdown();", in: webView)
+
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(highlightedText, "marked")
+        XCTAssertEqual(markdown, "Hello marked text")
+    }
+
+    func testWysiwygHeadingCommentHighlightsHeadingNotGeneratedTOC() async throws {
+        let markdown = """
+        # Fixture
+
+        [toc]
+
+        ## Images
+
+        Body
+        """
+        let location = (markdown as NSString).range(of: "Images").location
+        let comment = DocumentComment(
+            documentKey: "scratch:test",
+            range: SimpleLime.TextRange(location: location, length: 6),
+            quote: "Images"
+        )
+        let webView = try await makeWebView(markdown: markdown, comments: [comment], activeCommentID: comment.id)
+
+        let highlightedInHeading = try await evaluateBool(
+            "document.querySelector('h2 .comment-highlight')?.textContent === 'Images';",
+            in: webView
+        )
+        let highlightedInTOC = try await evaluateBool(
+            "Boolean(document.querySelector('[data-md-block=\"toc\"] .comment-highlight'));",
+            in: webView
+        )
+        let headingText = try await evaluateString("document.querySelector('h2')?.textContent || '';", in: webView)
+        let savedMarkdown = try await evaluateString("window.simplelimeTest.currentMarkdown();", in: webView)
+
+        XCTAssertTrue(highlightedInHeading)
+        XCTAssertFalse(highlightedInTOC)
+        XCTAssertEqual(headingText, "Images")
+        XCTAssertEqual(savedMarkdown, markdown)
+    }
+
+    func testWysiwygWholeHeadingLineCommentStillRendersAsHeading() async throws {
+        let markdown = """
+        # Fixture
+
+        ## Images
+
+        Body
+        """
+        let location = (markdown as NSString).range(of: "## Images").location
+        let comment = DocumentComment(
+            documentKey: "scratch:test",
+            range: SimpleLime.TextRange(location: location, length: "## Images".count),
+            quote: "## Images"
+        )
+        let webView = try await makeWebView(markdown: markdown, comments: [comment], activeCommentID: comment.id)
+
+        let highlightedInHeading = try await evaluateBool(
+            "document.querySelector('h2 .comment-highlight')?.textContent === 'Images';",
+            in: webView
+        )
+        let renderedAsHeading = try await evaluateBool("Boolean(document.querySelector('h2'));", in: webView)
+        let savedMarkdown = try await evaluateString("window.simplelimeTest.currentMarkdown();", in: webView)
+
+        XCTAssertTrue(highlightedInHeading)
+        XCTAssertTrue(renderedAsHeading)
+        XCTAssertEqual(savedMarkdown, markdown)
+    }
+
+    func testWysiwygImageAltCommentHighlightsVisibleCaption() async throws {
+        let markdown = #"![Relative local SVG](assets/simplelime-sample.svg "Relative local SVG")"#
+        let location = (markdown as NSString).range(of: "Relative").location
+        let comment = DocumentComment(
+            documentKey: "scratch:test",
+            range: SimpleLime.TextRange(location: location, length: "Relative".count),
+            quote: "Relative"
+        )
+        let webView = try await makeWebView(markdown: markdown, comments: [comment], activeCommentID: comment.id)
+
+        let highlightedCaption = try await evaluateBool(
+            "document.querySelector('figure[data-md-block=\"image\"] figcaption .comment-highlight')?.textContent === 'Relative';",
+            in: webView
+        )
+        let imageAlt = try await evaluateString(
+            "document.querySelector('figure[data-md-block=\"image\"] img')?.getAttribute('alt') || '';",
+            in: webView
+        )
+        let savedMarkdown = try await evaluateString("window.simplelimeTest.currentMarkdown();", in: webView)
+
+        XCTAssertTrue(highlightedCaption)
+        XCTAssertEqual(imageAlt, "Relative local SVG")
+        XCTAssertEqual(savedMarkdown, markdown)
+    }
+
+    func testWysiwygRemoteCollaboratorSelectionRendersWithoutChangingMarkdown() async throws {
+        let collaborator = RemoteCollaborator(
+            deviceID: "peer-1",
+            name: "Peer Mac",
+            selectionRanges: [TextRange(location: 6, length: 5)],
+            colorIndex: 1,
+            lastSeenAt: Date()
+        )
+        let webView = try await makeWebView(markdown: "Hello world", collaborators: [collaborator])
+
+        let highlightedText = try await evaluateString(
+            "document.querySelector('.collab-selection')?.textContent || '';",
+            in: webView
+        )
+        let title = try await evaluateString(
+            "document.querySelector('.collab-selection')?.getAttribute('title') || '';",
+            in: webView
+        )
+        let savedMarkdown = try await evaluateString("window.simplelimeTest.currentMarkdown();", in: webView)
+
+        XCTAssertEqual(highlightedText, "world")
+        XCTAssertEqual(title, "Peer Mac")
+        XCTAssertEqual(savedMarkdown, "Hello world")
+    }
+
     func testApplyingSelectionOffsetScrollsWysiwygViewportToCaret() async throws {
         let body = (1...120)
             .map { "Paragraph \($0)" }
@@ -1142,10 +1302,345 @@ final class MarkdownWYSIWYGEditorViewTests: XCTestCase {
         }
     }
 
+    func testBlockSourceEditorUpdatesMermaidAndMathBlocks() async throws {
+        let webView = try await makeWebView(
+            markdown:
+            """
+            ```mermaid
+            graph TD
+              A-->B
+            ```
+
+            $$
+            a^2 + b^2 = c^2
+            $$
+            """
+        )
+
+        let openedDiagram = try await evaluateBool(
+            "window.simplelimeTest.enterBlockSourceEdit('figure[data-md-block=\"diagram\"]');",
+            in: webView
+        )
+        XCTAssertTrue(openedDiagram)
+        let diagramSource = try await evaluateString("window.simplelimeTest.activeBlockSourceValue();", in: webView)
+        XCTAssertTrue(diagramSource.contains("graph TD"), diagramSource)
+
+        let nextDiagram = Self.javaScriptLiteral(
+            """
+            sequenceDiagram
+              User->>Editor: Type markdown
+              Editor-->>User: Stable visual output
+            """
+        )
+        try await evaluate("window.simplelimeTest.setActiveBlockSourceValue(\(nextDiagram));", in: webView)
+        let committedDiagram = try await evaluateBool("window.simplelimeTest.commitActiveBlockSourceEdit();", in: webView)
+        XCTAssertTrue(committedDiagram)
+
+        let openedMath = try await evaluateBool(
+            "window.simplelimeTest.enterBlockSourceEdit('figure[data-md-block=\"math\"]');",
+            in: webView
+        )
+        XCTAssertTrue(openedMath)
+        try await evaluate(#"window.simplelimeTest.setActiveBlockSourceValue("\\frac{x_1}{y^2} = 1");"#, in: webView)
+        let committedMath = try await evaluateBool("window.simplelimeTest.commitActiveBlockSourceEdit();", in: webView)
+        XCTAssertTrue(committedMath)
+        try await waitForAutoNormalization()
+
+        let html = try await evaluateString("window.simplelimeTest.editorHTML();", in: webView)
+        let markdown = try await evaluateString("window.simplelimeTest.currentMarkdown();", in: webView)
+
+        XCTAssertTrue(markdown.contains("```mermaid\nsequenceDiagram"), markdown)
+        XCTAssertTrue(markdown.contains("\\frac{x_1}{y^2} = 1"), markdown)
+        XCTAssertTrue(html.contains("data-md-block=\"diagram\""), html)
+        XCTAssertTrue(html.contains("data-md-block=\"math\""), html)
+    }
+
+    func testBlockSourceEditorKeepsTextareaEditableAndEscapeCancels() async throws {
+        let webView = try await makeWebView(
+            markdown:
+            """
+            ```mermaid
+            graph TD
+              A-->B
+            ```
+            """
+        )
+
+        let openedDiagram = try await evaluateBool(
+            "window.simplelimeTest.enterBlockSourceEdit('figure[data-md-block=\"diagram\"]');",
+            in: webView
+        )
+        XCTAssertTrue(openedDiagram)
+
+        let textareaEditable = try await evaluateBool(
+            """
+            (() => {
+              const textarea = document.querySelector('.block-source-textarea');
+              if (!textarea) return false;
+              textarea.focus();
+              textarea.setSelectionRange(0, 5);
+              const key = new KeyboardEvent('keydown', { key: 'x', bubbles: true, cancelable: true });
+              textarea.dispatchEvent(key);
+              textarea.setRangeText('flowchart', 0, 5, 'end');
+              textarea.dispatchEvent(new Event('input', { bubbles: true }));
+              return document.activeElement === textarea &&
+                textarea.selectionStart === 'flowchart'.length &&
+                key.defaultPrevented === false &&
+                textarea.value.startsWith('flowchart');
+            })();
+            """,
+            in: webView
+        )
+        XCTAssertTrue(textareaEditable)
+
+        let escapeClosedEditor = try await evaluateBool(
+            """
+            (() => {
+              const textarea = document.querySelector('.block-source-textarea');
+              if (!textarea) return false;
+              const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+              textarea.dispatchEvent(event);
+              return event.defaultPrevented && !document.querySelector('.block-source-editor');
+            })();
+            """,
+            in: webView
+        )
+        XCTAssertTrue(escapeClosedEditor)
+    }
+
+    func testBlockSourceEditorUpdatesHTMLMediaAndImageMarkdown() async throws {
+        let imageURL = try makeTemporaryPNG(named: "source-edit-image.png")
+        let webView = try await makeWebView(
+            markdown:
+            """
+            <video src="https://example.com/movie.mp4" controls></video>
+
+            ![Before](\(imageURL.path))
+            """
+        )
+
+        let openedMedia = try await evaluateBool(
+            "window.simplelimeTest.enterBlockSourceEdit('figure[data-md-block=\"html-media\"]');",
+            in: webView
+        )
+        XCTAssertTrue(openedMedia)
+        try await evaluate(
+            #"window.simplelimeTest.setActiveBlockSourceValue('<iframe src="https://example.com/embed" title="Demo"></iframe>');"#,
+            in: webView
+        )
+        let committedMedia = try await evaluateBool("window.simplelimeTest.commitActiveBlockSourceEdit();", in: webView)
+        XCTAssertTrue(committedMedia)
+
+        let openedImage = try await evaluateBool(
+            "window.simplelimeTest.enterBlockSourceEdit('figure[data-md-block=\"image\"]');",
+            in: webView
+        )
+        XCTAssertTrue(openedImage)
+        let imageMarkdown = Self.javaScriptLiteral("![After](\(imageURL.path))")
+        try await evaluate(
+            "window.simplelimeTest.setActiveBlockSourceValue(\(imageMarkdown));",
+            in: webView
+        )
+        let committedImage = try await evaluateBool("window.simplelimeTest.commitActiveBlockSourceEdit();", in: webView)
+        XCTAssertTrue(committedImage)
+        try await waitForImagesToLoad(in: webView)
+
+        let html = try await evaluateString("window.simplelimeTest.editorHTML();", in: webView)
+        let markdown = try await evaluateString("window.simplelimeTest.currentMarkdown();", in: webView)
+
+        XCTAssertTrue(html.contains("<iframe"), html)
+        XCTAssertTrue(markdown.contains(#"<iframe src="https://example.com/embed" title="Demo"></iframe>"#), markdown)
+        XCTAssertTrue(markdown.contains("![After](\(imageURL.path))"), markdown)
+    }
+
+    func testAtomicBoundariesDoNotRoundTripAndArrowKeysCrossRenderedBlocks() async throws {
+        let markdown =
+            """
+            Before
+
+            ```mermaid
+            graph TD
+              A-->B
+            ```
+
+            After
+            """
+        let webView = try await makeWebView(markdown: markdown)
+
+        let boundaryCount = try await evaluateInt("window.simplelimeTest.atomicBoundaryCount();", in: webView)
+        let savedMarkdown = try await evaluateString("window.simplelimeTest.currentMarkdown();", in: webView)
+        XCTAssertGreaterThanOrEqual(boundaryCount, 2)
+        XCTAssertFalse(savedMarkdown.contains("\u{200B}"), savedMarkdown)
+        XCTAssertTrue(savedMarkdown.contains("```mermaid"), savedMarkdown)
+
+        let selectedBeforeParagraphEnd = try await evaluateBool("window.simplelimeTest.selectText('#editor p:first-of-type', 6, 6);", in: webView)
+        XCTAssertTrue(selectedBeforeParagraphEnd)
+        let arrowDownFromParagraphHandled = try await evaluateBool("window.simplelimeTest.dispatchKey('ArrowDown');", in: webView)
+        XCTAssertTrue(arrowDownFromParagraphHandled)
+        let caretAfterFromParagraph = try await evaluateBool(
+            """
+            (() => {
+              const selection = window.getSelection();
+              const figure = document.querySelector('figure[data-md-block="diagram"]');
+              if (!selection || !selection.rangeCount || !figure) return false;
+              const selectionRange = selection.getRangeAt(0);
+              const figureRange = document.createRange();
+              figureRange.selectNode(figure);
+              return selectionRange.compareBoundaryPoints(Range.START_TO_END, figureRange) >= 0;
+            })();
+            """,
+            in: webView
+        )
+        XCTAssertTrue(caretAfterFromParagraph)
+
+        let selectedAfterParagraphStart = try await evaluateBool("window.simplelimeTest.selectText('#editor p:last-of-type', 0, 0);", in: webView)
+        XCTAssertTrue(selectedAfterParagraphStart)
+        let arrowUpFromParagraphHandled = try await evaluateBool("window.simplelimeTest.dispatchKey('ArrowUp');", in: webView)
+        XCTAssertTrue(arrowUpFromParagraphHandled)
+        let caretBeforeFromParagraph = try await evaluateBool(
+            """
+            (() => {
+              const selection = window.getSelection();
+              const figure = document.querySelector('figure[data-md-block="diagram"]');
+              if (!selection || !selection.rangeCount || !figure) return false;
+              const selectionRange = selection.getRangeAt(0);
+              const figureRange = document.createRange();
+              figureRange.selectNode(figure);
+              return selectionRange.compareBoundaryPoints(Range.START_TO_START, figureRange) <= 0;
+            })();
+            """,
+            in: webView
+        )
+        XCTAssertTrue(caretBeforeFromParagraph)
+
+        let placedBefore = try await evaluateBool("window.simplelimeTest.setCaretBeforeBlock('figure[data-md-block=\"diagram\"]');", in: webView)
+        let arrowRightHandled = try await evaluateBool("window.simplelimeTest.dispatchKey('ArrowRight');", in: webView)
+        XCTAssertTrue(placedBefore)
+        XCTAssertTrue(arrowRightHandled)
+        let caretAfterDiagram = try await evaluateBool(
+            """
+            (() => {
+              const selection = window.getSelection();
+              const figure = document.querySelector('figure[data-md-block="diagram"]');
+              if (!selection || !selection.rangeCount || !figure) return false;
+              const selectionRange = selection.getRangeAt(0);
+              const figureRange = document.createRange();
+              figureRange.selectNode(figure);
+              return selectionRange.compareBoundaryPoints(Range.START_TO_END, figureRange) >= 0;
+            })();
+            """,
+            in: webView
+        )
+        XCTAssertTrue(caretAfterDiagram)
+
+        let placedAfter = try await evaluateBool("window.simplelimeTest.setCaretAfterBlock('figure[data-md-block=\"diagram\"]');", in: webView)
+        let arrowLeftHandled = try await evaluateBool("window.simplelimeTest.dispatchKey('ArrowLeft');", in: webView)
+        XCTAssertTrue(placedAfter)
+        XCTAssertTrue(arrowLeftHandled)
+        let caretBeforeDiagram = try await evaluateBool(
+            """
+            (() => {
+              const selection = window.getSelection();
+              const figure = document.querySelector('figure[data-md-block="diagram"]');
+              if (!selection || !selection.rangeCount || !figure) return false;
+              const selectionRange = selection.getRangeAt(0);
+              const figureRange = document.createRange();
+              figureRange.selectNode(figure);
+              return selectionRange.compareBoundaryPoints(Range.START_TO_START, figureRange) <= 0;
+            })();
+            """,
+            in: webView
+        )
+        XCTAssertTrue(caretBeforeDiagram)
+    }
+
+    func testArrowUpEscapesParagraphAfterHorizontalRule() async throws {
+        let markdown =
+            """
+            ## Rules And References
+
+            ---
+
+            Reference definitions should be preserved and usable by WYSIWYG paragraphs.
+            """
+        let webView = try await makeWebView(markdown: markdown)
+
+        let selectedParagraphStart = try await evaluateBool("window.simplelimeTest.selectText('#editor p', 0, 0);", in: webView)
+        XCTAssertTrue(selectedParagraphStart)
+
+        let arrowUpHandled = try await evaluateBool("window.simplelimeTest.dispatchKey('ArrowUp');", in: webView)
+        XCTAssertTrue(arrowUpHandled)
+
+        let caretEscapedAboveRule = try await evaluateBool(
+            """
+            (() => {
+              const selection = window.getSelection();
+              const rule = document.querySelector('hr');
+              if (!selection || !selection.rangeCount || !rule) return false;
+              const selectionRange = selection.getRangeAt(0);
+              const ruleRange = document.createRange();
+              ruleRange.selectNode(rule);
+              return selectionRange.compareBoundaryPoints(Range.START_TO_START, ruleRange) <= 0;
+            })();
+            """,
+            in: webView
+        )
+        let savedMarkdown = try await evaluateString("window.simplelimeTest.currentMarkdown();", in: webView)
+
+        XCTAssertTrue(caretEscapedAboveRule)
+        XCTAssertEqual(savedMarkdown, markdown)
+    }
+
+    func testCommandSlashShortcutIsHandledInWysiwygAndBlockSourceEditor() async throws {
+        let webView = try await makeWebView(
+            markdown:
+            """
+            ```mermaid
+            graph TD
+              A-->B
+            ```
+            """
+        )
+
+        let handledFromEditor = try await evaluateBool(
+            "window.simplelimeTest.dispatchKey('/', { metaKey: true });",
+            in: webView
+        )
+        XCTAssertTrue(handledFromEditor)
+
+        let openedDiagram = try await evaluateBool(
+            "window.simplelimeTest.enterBlockSourceEdit('figure[data-md-block=\"diagram\"]');",
+            in: webView
+        )
+        XCTAssertTrue(openedDiagram)
+
+        let handledFromSourceEditor = try await evaluateBool(
+            """
+            (() => {
+              const textarea = document.querySelector('.block-source-textarea');
+              const event = new KeyboardEvent('keydown', {
+                key: '/',
+                code: 'Slash',
+                bubbles: true,
+                cancelable: true,
+                metaKey: true
+              });
+              textarea.dispatchEvent(event);
+              return event.defaultPrevented;
+            })();
+            """,
+            in: webView
+        )
+        XCTAssertTrue(handledFromSourceEditor)
+    }
+
     private func makeWebView(
         markdown: String = "",
         typewriterModeEnabled: Bool = false,
-        baseURL: URL = URL(fileURLWithPath: "/", isDirectory: true)
+        baseURL: URL = URL(fileURLWithPath: "/", isDirectory: true),
+        comments: [DocumentComment] = [],
+        activeCommentID: UUID? = nil,
+        collaborators: [RemoteCollaborator] = []
     ) async throws -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
@@ -1158,7 +1653,10 @@ final class MarkdownWYSIWYGEditorViewTests: XCTestCase {
             markdown: markdown,
             fontSize: 14,
             typewriterModeEnabled: typewriterModeEnabled,
-            baseURL: baseURL
+            baseURL: baseURL,
+            comments: comments,
+            activeCommentID: activeCommentID,
+            collaborators: collaborators
         )
         try await waiter.load(html: html, baseURL: baseURL, in: webView)
         try await waitUntilTestBridgeIsReady(in: webView)

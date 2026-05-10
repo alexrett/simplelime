@@ -22,6 +22,8 @@ enum EditorShortcut {
     case toggleFocusMode
     case toggleTypewriterMode
     case toggleMiniMap
+    case toggleCommentsPanel
+    case addComment
     case transform(TextTransform)
     case editorCommand(EditorCommand)
     case markdown(MarkdownCommand)

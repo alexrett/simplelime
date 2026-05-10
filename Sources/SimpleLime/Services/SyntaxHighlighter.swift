@@ -4,6 +4,15 @@ import STTextView
 
 enum SyntaxHighlighter {
     private static let complexHighlightCharacterLimit = 250_000
+    private typealias AttributeApplicator = ([NSAttributedString.Key: Any], NSRange) -> Void
+
+    private struct MarkdownFence {
+        let fullRange: NSRange
+        let openingRange: NSRange
+        let contentRange: NSRange
+        let closingRange: NSRange?
+        let language: String
+    }
 
     static func apply(to textView: NSTextView, language: EditorLanguage, fontSize: CGFloat) {
         let storage = textView.textStorage
@@ -90,7 +99,52 @@ enum SyntaxHighlighter {
     }
 
     private static func applyMarkdown(to storage: NSTextStorage?, text: String, baseFont: NSFont) {
-        applyPattern("(?m)^#{1,6}\\s.*$", to: storage, text: text) { range in
+        applyMarkdown(text: text, baseFont: baseFont) { attributes, range in
+            storage?.addAttributes(attributes, range: range)
+        }
+    }
+
+    private static func applyMarkdown(text: String, baseFont: NSFont, addAttributes: AttributeApplicator) {
+        let fences = markdownFences(in: text)
+        let excludedRanges = fences.map(\.fullRange)
+        let codeFont = NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular)
+        let fenceFont = NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .medium)
+
+        for fence in fences {
+            addAttributes(
+                [
+                    .font: fenceFont,
+                    .foregroundColor: NSColor.secondaryLabelColor
+                ],
+                fence.openingRange
+            )
+
+            if fence.contentRange.length > 0 {
+                addAttributes(
+                    [
+                        .font: codeFont,
+                        .foregroundColor: NSColor.labelColor
+                    ],
+                    fence.contentRange
+                )
+
+                if let language = codeLanguage(forMarkdownFenceLanguage: fence.language) {
+                    applyCode(text: text, language: language, baseFont: baseFont, range: fence.contentRange, addAttributes: addAttributes)
+                }
+            }
+
+            if let closingRange = fence.closingRange {
+                addAttributes(
+                    [
+                        .font: fenceFont,
+                        .foregroundColor: NSColor.secondaryLabelColor
+                    ],
+                    closingRange
+                )
+            }
+        }
+
+        applyPattern("(?m)^#{1,6}\\s.*$", text: text, excluding: excludedRanges, addAttributes: addAttributes) { range in
             let levelText = (text as NSString).substring(with: range)
             let level = levelText.prefix { $0 == "#" }.count
             let size = max(baseFont.pointSize + CGFloat(7 - level), baseFont.pointSize)
@@ -100,26 +154,26 @@ enum SyntaxHighlighter {
             ]
         }
 
-        applyPattern("(?m)^>.*$", to: storage, text: text) { _ in
+        applyPattern("(?m)^>.*$", text: text, excluding: excludedRanges, addAttributes: addAttributes) { _ in
             [.foregroundColor: NSColor.systemTeal]
         }
 
-        applyPattern("(?m)^\\s*[-*+]\\s+", to: storage, text: text) { _ in
+        applyPattern("(?m)^\\s*[-*+]\\s+", text: text, excluding: excludedRanges, addAttributes: addAttributes) { _ in
             [.foregroundColor: NSColor.systemOrange]
         }
 
-        applyPattern("`[^`]+`", to: storage, text: text) { _ in
+        applyPattern("(?<!`)`[^`\\n]+`(?!`)", text: text, excluding: excludedRanges, addAttributes: addAttributes) { _ in
             [
                 .font: NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .medium),
                 .foregroundColor: NSColor.systemPurple
             ]
         }
 
-        applyPattern("\\*\\*[^*]+\\*\\*", to: storage, text: text) { _ in
+        applyPattern("\\*\\*[^*\\n]+\\*\\*", text: text, excluding: excludedRanges, addAttributes: addAttributes) { _ in
             [.font: NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .bold)]
         }
 
-        applyPattern("https?://[^\\s)]+", to: storage, text: text) { _ in
+        applyPattern("https?://[^\\s)]+", text: text, excluding: excludedRanges, addAttributes: addAttributes) { _ in
             [
                 .foregroundColor: NSColor.linkColor,
                 .underlineStyle: NSUnderlineStyle.single.rawValue
@@ -143,21 +197,33 @@ enum SyntaxHighlighter {
     }
 
     private static func applyCode(to storage: NSTextStorage?, text: String, language: EditorLanguage, baseFont: NSFont) {
-        applyPattern("\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*'", to: storage, text: text) { _ in
+        applyCode(text: text, language: language, baseFont: baseFont) { attributes, range in
+            storage?.addAttributes(attributes, range: range)
+        }
+    }
+
+    private static func applyCode(
+        text: String,
+        language: EditorLanguage,
+        baseFont: NSFont,
+        range: NSRange? = nil,
+        addAttributes: AttributeApplicator
+    ) {
+        applyPattern("\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*'", text: text, range: range, addAttributes: addAttributes) { _ in
             [.foregroundColor: NSColor.systemRed]
         }
 
-        applyPattern("\\b\\d+(?:\\.\\d+)?\\b", to: storage, text: text) { _ in
+        applyPattern("\\b\\d+(?:\\.\\d+)?\\b", text: text, range: range, addAttributes: addAttributes) { _ in
             [.foregroundColor: NSColor.systemOrange]
         }
 
-        applyPattern(commentPattern(for: language), to: storage, text: text) { _ in
+        applyPattern(commentPattern(for: language), text: text, range: range, addAttributes: addAttributes) { _ in
             [.foregroundColor: NSColor.systemGreen]
         }
 
         let keywords = keywordPattern(for: language)
         if !keywords.isEmpty {
-            applyPattern("\\b(\(keywords))\\b", to: storage, text: text) { _ in
+            applyPattern("\\b(\(keywords))\\b", text: text, range: range, addAttributes: addAttributes) { _ in
                 [
                     .font: NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .semibold),
                     .foregroundColor: NSColor.systemBlue
@@ -167,64 +233,14 @@ enum SyntaxHighlighter {
     }
 
     private static func applyMarkdown(to textView: STTextView, text: String, baseFont: NSFont) {
-        applyPattern("(?m)^#{1,6}\\s.*$", to: textView, text: text) { range in
-            let levelText = (text as NSString).substring(with: range)
-            let level = levelText.prefix { $0 == "#" }.count
-            let size = max(baseFont.pointSize + CGFloat(7 - level), baseFont.pointSize)
-            return [
-                .font: NSFont.systemFont(ofSize: size, weight: .semibold),
-                .foregroundColor: NSColor.systemBlue
-            ]
-        }
-
-        applyPattern("(?m)^>.*$", to: textView, text: text) { _ in
-            [.foregroundColor: NSColor.systemTeal]
-        }
-
-        applyPattern("(?m)^\\s*[-*+]\\s+", to: textView, text: text) { _ in
-            [.foregroundColor: NSColor.systemOrange]
-        }
-
-        applyPattern("`[^`]+`", to: textView, text: text) { _ in
-            [
-                .font: NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .medium),
-                .foregroundColor: NSColor.systemPurple
-            ]
-        }
-
-        applyPattern("\\*\\*[^*]+\\*\\*", to: textView, text: text) { _ in
-            [.font: NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .bold)]
-        }
-
-        applyPattern("https?://[^\\s)]+", to: textView, text: text) { _ in
-            [
-                .foregroundColor: NSColor.linkColor,
-                .underlineStyle: NSUnderlineStyle.single.rawValue
-            ]
+        applyMarkdown(text: text, baseFont: baseFont) { attributes, range in
+            textView.addAttributes(attributes, range: range)
         }
     }
 
     private static func applyCode(to textView: STTextView, text: String, language: EditorLanguage, baseFont: NSFont) {
-        applyPattern("\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*'", to: textView, text: text) { _ in
-            [.foregroundColor: NSColor.systemRed]
-        }
-
-        applyPattern("\\b\\d+(?:\\.\\d+)?\\b", to: textView, text: text) { _ in
-            [.foregroundColor: NSColor.systemOrange]
-        }
-
-        applyPattern(commentPattern(for: language), to: textView, text: text) { _ in
-            [.foregroundColor: NSColor.systemGreen]
-        }
-
-        let keywords = keywordPattern(for: language)
-        if !keywords.isEmpty {
-            applyPattern("\\b(\(keywords))\\b", to: textView, text: text) { _ in
-                [
-                    .font: NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .semibold),
-                    .foregroundColor: NSColor.systemBlue
-                ]
-            }
+        applyCode(text: text, language: language, baseFont: baseFont) { attributes, range in
+            textView.addAttributes(attributes, range: range)
         }
     }
 
@@ -270,8 +286,10 @@ enum SyntaxHighlighter {
 
     private static func applyPattern(
         _ pattern: String,
-        to storage: NSTextStorage?,
         text: String,
+        range: NSRange? = nil,
+        excluding excludedRanges: [NSRange] = [],
+        addAttributes: AttributeApplicator,
         attributes: (NSRange) -> [NSAttributedString.Key: Any]
     ) {
         guard !pattern.isEmpty,
@@ -280,29 +298,131 @@ enum SyntaxHighlighter {
         }
 
         let nsText = text as NSString
-        let fullRange = NSRange(location: 0, length: nsText.length)
-        regex.enumerateMatches(in: text, range: fullRange) { match, _, _ in
+        let searchRange = range ?? NSRange(location: 0, length: nsText.length)
+        regex.enumerateMatches(in: text, range: searchRange) { match, _, _ in
             guard let range = match?.range, range.location != NSNotFound else { return }
-            storage?.addAttributes(attributes(range), range: range)
+            guard !range.intersectsAny(excludedRanges) else { return }
+            addAttributes(attributes(range), range)
         }
     }
 
-    private static func applyPattern(
-        _ pattern: String,
-        to textView: STTextView,
-        text: String,
-        attributes: (NSRange) -> [NSAttributedString.Key: Any]
-    ) {
-        guard !pattern.isEmpty,
-              let regex = try? NSRegularExpression(pattern: pattern) else {
-            return
+    private static func markdownFences(in text: String) -> [MarkdownFence] {
+        let nsText = text as NSString
+        var fences: [MarkdownFence] = []
+        var location = 0
+
+        while location < nsText.length {
+            let lineRange = nsText.lineRange(for: NSRange(location: location, length: 0))
+            let line = nsText.substring(with: lineRange)
+
+            guard let opening = markdownFenceOpening(line) else {
+                location = nextLineLocation(after: lineRange, textLength: nsText.length)
+                continue
+            }
+
+            let contentStart = lineRange.location + lineRange.length
+            var scanLocation = contentStart
+            var closingRange: NSRange?
+
+            while scanLocation < nsText.length {
+                let currentLineRange = nsText.lineRange(for: NSRange(location: scanLocation, length: 0))
+                let currentLine = nsText.substring(with: currentLineRange)
+                if markdownFenceClosing(currentLine, matches: opening.marker) {
+                    closingRange = currentLineRange
+                    break
+                }
+                scanLocation = nextLineLocation(after: currentLineRange, textLength: nsText.length)
+            }
+
+            let contentEnd = closingRange?.location ?? nsText.length
+            let fullEnd = closingRange.map { $0.location + $0.length } ?? nsText.length
+            fences.append(
+                MarkdownFence(
+                    fullRange: NSRange(location: lineRange.location, length: fullEnd - lineRange.location),
+                    openingRange: lineRange,
+                    contentRange: NSRange(location: contentStart, length: max(0, contentEnd - contentStart)),
+                    closingRange: closingRange,
+                    language: opening.language
+                )
+            )
+            location = fullEnd
         }
 
-        let nsText = text as NSString
-        let fullRange = NSRange(location: 0, length: nsText.length)
-        regex.enumerateMatches(in: text, range: fullRange) { match, _, _ in
-            guard let range = match?.range, range.location != NSNotFound else { return }
-            textView.addAttributes(attributes(range), range: range)
+        return fences
+    }
+
+    private static func markdownFenceOpening(_ line: String) -> (marker: String, language: String)? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first, first == "`" || first == "~" else { return nil }
+
+        let markerLength = trimmed.prefix { $0 == first }.count
+        guard markerLength >= 3 else { return nil }
+
+        let marker = String(repeating: String(first), count: markerLength)
+        let language = trimmed
+            .dropFirst(markerLength)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isWhitespace)
+            .first
+            .map(String.init) ?? ""
+
+        return (marker, language)
+    }
+
+    private static func markdownFenceClosing(_ line: String, matches marker: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = marker.first,
+              trimmed.first == first else {
+            return false
         }
+
+        return trimmed.prefix { $0 == first }.count >= marker.count
+    }
+
+    private static func nextLineLocation(after lineRange: NSRange, textLength: Int) -> Int {
+        let next = lineRange.location + max(lineRange.length, 1)
+        return min(next, textLength)
+    }
+
+    private static func codeLanguage(forMarkdownFenceLanguage language: String) -> EditorLanguage? {
+        let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return nil }
+
+        let fileExtension: String
+        switch normalized {
+        case "javascript", "js", "jsx", "mjs", "cjs":
+            fileExtension = "js"
+        case "typescript", "ts", "tsx":
+            fileExtension = "ts"
+        case "html", "xml":
+            fileExtension = "html"
+        case "css", "scss", "sass":
+            fileExtension = "css"
+        case "python", "py":
+            fileExtension = "py"
+        case "ruby", "rb":
+            fileExtension = "rb"
+        case "golang", "go":
+            fileExtension = "go"
+        case "rust", "rs":
+            fileExtension = "rs"
+        case "shell", "bash", "zsh", "fish", "sh":
+            fileExtension = "sh"
+        case "json", "jsonl":
+            fileExtension = "json"
+        case "swift":
+            fileExtension = "swift"
+        default:
+            return nil
+        }
+
+        let detected = EditorLanguage.detect(fileName: "block.\(fileExtension)")
+        return detected == .plain || detected == .markdown ? nil : detected
+    }
+}
+
+private extension NSRange {
+    func intersectsAny(_ ranges: [NSRange]) -> Bool {
+        ranges.contains { NSIntersectionRange(self, $0).length > 0 }
     }
 }

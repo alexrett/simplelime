@@ -153,6 +153,17 @@ struct SimpleLimeCommands: Commands {
             .keyboardShortcut("l", modifiers: [.command])
         }
 
+        CommandMenu("Comments") {
+            Button("Add Comment") {
+                store?.addCommentToSelection()
+            }
+            .keyboardShortcut("c", modifiers: [.command, .option])
+
+            Button(store?.isCommentsPanelVisible == true ? "Hide Comments" : "Show Comments") {
+                store?.toggleCommentsPanel()
+            }
+        }
+
         CommandMenu("Text") {
             Button("Add Next Occurrence") {
                 store?.addNextOccurrence()
@@ -240,7 +251,6 @@ struct SimpleLimeCommands: Commands {
             Button("Toggle Comment") {
                 store?.performEditorCommand(.toggleComment)
             }
-            .keyboardShortcut("/", modifiers: [.command])
         }
 
         CommandMenu("Markdown") {
@@ -264,7 +274,8 @@ struct SimpleLimeCommands: Commands {
             Button(store?.isWysiwygModeEnabled == true ? "Disable WYSIWYG Mode" : "Enable WYSIWYG Mode") {
                 store?.toggleWysiwygMode()
             }
-            .keyboardShortcut("e", modifiers: [.command, .option])
+            .keyboardShortcut("/", modifiers: [.command])
+            .disabled(!(store?.selectedBuffer?.language.isMarkdown ?? false))
 
             Divider()
 
@@ -398,7 +409,6 @@ struct SimpleLimeCommands: Commands {
             Button(store?.isWysiwygModeEnabled == true ? "Disable WYSIWYG Mode" : "Enable WYSIWYG Mode") {
                 store?.toggleWysiwygMode()
             }
-            .keyboardShortcut("e", modifiers: [.command, .option])
 
             Button(store?.isMiniMapVisible == true ? "Hide Minimap" : "Show Minimap") {
                 store?.toggleMiniMap()

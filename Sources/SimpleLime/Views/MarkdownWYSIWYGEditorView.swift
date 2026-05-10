@@ -9,6 +9,10 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
     var baseURL: URL?
     var fontSize: Double
     var typewriterModeEnabled: Bool
+    var comments: [DocumentComment] = []
+    var activeCommentID: UUID?
+    var collaborators: [RemoteCollaborator] = []
+    var onSelectComment: (UUID) -> Void = { _ in }
     var onShortcut: (EditorShortcut) -> Void
     var onRegisterEditorCommandHandler: (@escaping (EditorCommand) -> Bool) -> Void
 
@@ -38,7 +42,10 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
                 markdown: text,
                 fontSize: fontSize,
                 typewriterModeEnabled: typewriterModeEnabled,
-                baseURL: baseURL
+                baseURL: baseURL,
+                comments: comments,
+                activeCommentID: activeCommentID,
+                collaborators: collaborators
             ),
             baseURL: baseURL ?? URL(fileURLWithPath: "/", isDirectory: true)
         )
@@ -64,6 +71,8 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
         }
 
         context.coordinator.applyEditorOptions(fontSize: fontSize, typewriterModeEnabled: typewriterModeEnabled)
+        context.coordinator.applyCommentsIfNeeded(comments, activeCommentID: activeCommentID)
+        context.coordinator.applyCollaboratorsIfNeeded(collaborators)
         context.coordinator.applySelectionIfNeeded(selectionRanges)
     }
 
@@ -77,11 +86,22 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
         }
     }
 
-    static func html(markdown: String, fontSize: Double, typewriterModeEnabled: Bool, baseURL: URL? = nil) -> String {
+    static func html(
+        markdown: String,
+        fontSize: Double,
+        typewriterModeEnabled: Bool,
+        baseURL: URL? = nil,
+        comments: [DocumentComment] = [],
+        activeCommentID: UUID? = nil,
+        collaborators: [RemoteCollaborator] = []
+    ) -> String {
         let initialMarkdown = javaScriptLiteral(markdown)
         let initialFontSize = max(10, min(32, fontSize))
         let initialTypewriter = typewriterModeEnabled ? "true" : "false"
         let documentBasePath = baseURL?.isFileURL == true ? javaScriptLiteral(baseURL?.path ?? "") : "\"\""
+        let initialComments = commentsJavaScriptLiteral(comments)
+        let initialActiveCommentID = javaScriptLiteral(activeCommentID?.uuidString ?? "")
+        let initialCollaborators = collaboratorsJavaScriptLiteral(collaborators)
 
         return #"""
         <!doctype html>
@@ -174,6 +194,34 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
               color: inherit;
               border-radius: 3px;
               padding: 0 2px;
+            }
+
+            .comment-highlight {
+              border-radius: 3px;
+              background: color-mix(in srgb, #ffd60a 32%, transparent);
+              box-shadow: 0 0 0 1px color-mix(in srgb, #ffd60a 18%, transparent);
+              cursor: pointer;
+            }
+
+            .comment-highlight.is-active {
+              background: color-mix(in srgb, var(--accent) 34%, transparent);
+              box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 42%, transparent);
+            }
+
+            .collab-selection {
+              border-radius: 3px;
+              background: color-mix(in srgb, var(--collab-color, #0a84ff) 24%, transparent);
+              box-shadow: 0 0 0 1px color-mix(in srgb, var(--collab-color, #0a84ff) 30%, transparent);
+            }
+
+            .collab-cursor {
+              display: inline-block;
+              width: 2px;
+              height: 1.25em;
+              margin: -0.1em 1px -0.25em;
+              border-radius: 2px;
+              background: var(--collab-color, #0a84ff);
+              vertical-align: text-bottom;
             }
 
             .inline-math {
@@ -336,6 +384,108 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
               display: none;
             }
 
+            [data-simplelime-boundary="true"] {
+              display: block;
+              height: 1px;
+              min-height: 1px;
+              overflow: hidden;
+              line-height: 1px;
+              outline: none;
+            }
+
+            [data-simplelime-boundary="true"]::selection {
+              background: transparent;
+            }
+
+            [data-simplelime-atomic="true"] {
+              outline: none;
+            }
+
+            [data-simplelime-atomic="true"]:focus {
+              outline: 1px solid color-mix(in srgb, var(--accent) 56%, transparent);
+              outline-offset: 3px;
+            }
+
+            .block-source-editing {
+              outline: 1px solid color-mix(in srgb, var(--accent) 48%, transparent);
+              outline-offset: 3px;
+            }
+
+            pre.block-source-editing {
+              display: none;
+            }
+
+            figure.block-source-editing > pre,
+            figure.block-source-editing > img,
+            figure.block-source-editing > video,
+            figure.block-source-editing > audio,
+            figure.block-source-editing > iframe,
+            figure.block-source-editing > figcaption,
+            figure.block-source-editing > .diagram-render,
+            figure.block-source-editing > .math-render {
+              display: none;
+            }
+
+            .block-source-editor {
+              box-sizing: border-box;
+              margin: 0.8em 0;
+              padding: 10px;
+              border-radius: 7px;
+              border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+              background: color-mix(in srgb, CanvasText 7%, transparent);
+            }
+
+            .block-source-textarea {
+              box-sizing: border-box;
+              width: 100%;
+              min-height: 120px;
+              max-height: 48vh;
+              resize: vertical;
+              border: 0;
+              outline: none;
+              border-radius: 5px;
+              padding: 10px 11px;
+              color: CanvasText;
+              background: color-mix(in srgb, Canvas 76%, transparent);
+              font: 0.9em/1.5 "SF Mono", ui-monospace, Menlo, monospace;
+              letter-spacing: 0;
+              white-space: pre;
+              tab-size: 2;
+              caret-color: var(--accent);
+              -webkit-user-select: text;
+              user-select: text;
+              pointer-events: auto;
+            }
+
+            .block-source-textarea.is-invalid {
+              outline: 1px solid color-mix(in srgb, #ff453a 70%, transparent);
+            }
+
+            .block-source-actions {
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              gap: 10px;
+              margin-top: 8px;
+              color: color-mix(in srgb, CanvasText 56%, transparent);
+              font-size: 0.78em;
+            }
+
+            .block-source-actions button {
+              appearance: none;
+              border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+              border-radius: 5px;
+              padding: 4px 8px;
+              color: CanvasText;
+              background: color-mix(in srgb, CanvasText 8%, transparent);
+              font: inherit;
+            }
+
+            .block-source-actions button[data-action="commit"] {
+              border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+              color: var(--accent);
+            }
+
             .callout {
               margin: 0.9em 0;
               padding: 11px 13px;
@@ -442,9 +592,19 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             const initialMarkdown = \#(initialMarkdown);
             const initialTypewriter = \#(initialTypewriter);
             const documentBasePath = \#(documentBasePath);
+            const initialComments = \#(initialComments);
+            const initialActiveCommentID = \#(initialActiveCommentID);
+            const initialCollaborators = \#(initialCollaborators);
             const editor = document.getElementById('editor');
             const tableToolbar = document.getElementById('table-toolbar');
             const CARET_TOKEN = String.fromCharCode(0xE000) + 'simplelime-caret' + String.fromCharCode(0xE000);
+            const COMMENT_TOKEN_EDGE = String.fromCharCode(0xE001);
+            const COMMENT_MARKER_SOURCE = `${COMMENT_TOKEN_EDGE}simplelime-comment-(start|end):([^${COMMENT_TOKEN_EDGE}]+)${COMMENT_TOKEN_EDGE}`;
+            const COMMENT_MARKER_PATTERN = new RegExp(COMMENT_MARKER_SOURCE, 'g');
+            const COMMENT_MARKER_TOKEN_PATTERN = new RegExp(`${COMMENT_TOKEN_EDGE}simplelime-comment-(?:start|end):[^${COMMENT_TOKEN_EDGE}]+${COMMENT_TOKEN_EDGE}`, 'g');
+            const COLLAB_TOKEN_EDGE = String.fromCharCode(0xE002);
+            const COLLAB_MARKER_SOURCE = `${COLLAB_TOKEN_EDGE}simplelime-collab-(cursor|start|end):([^${COLLAB_TOKEN_EDGE}]+)${COLLAB_TOKEN_EDGE}`;
+            const COLLAB_MARKER_PATTERN = new RegExp(COLLAB_MARKER_SOURCE, 'g');
             let isSettingMarkdown = false;
             let lastPostedMarkdown = initialMarkdown;
             let lastRestoredCaretOffset = null;
@@ -455,9 +615,35 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             let mermaidModulePromise = null;
             let activeTableCell = null;
             let lastPostedSelectionOffset = null;
+            let lastPostedSelectionSignature = null;
+            let activeComments = Array.isArray(initialComments) ? initialComments : [];
+            let activeCommentID = initialActiveCommentID || '';
+            let activeCollaborators = Array.isArray(initialCollaborators) ? initialCollaborators : [];
             let activeReferences = new Map();
             const pendingPastedImages = new Map();
             let renderSerial = 0;
+            const ATOMIC_BLOCK_SELECTOR = [
+              'figure[data-md-block="image"]',
+              'figure[data-md-block="html-image"]',
+              'figure[data-md-block="html-media"]',
+              'figure[data-md-block="diagram"]',
+              'figure[data-md-block="math"]',
+              'pre[data-md-block="code"]',
+              'pre[data-md-block="front-matter"]',
+              'div[data-md-block="toc"]',
+              'section[data-md-block="link-reference"]',
+              'hr'
+            ].join(',');
+            const SOURCE_EDITABLE_BLOCK_SELECTOR = [
+              'figure[data-md-block="image"]',
+              'figure[data-md-block="html-image"]',
+              'figure[data-md-block="html-media"]',
+              'figure[data-md-block="diagram"]',
+              'figure[data-md-block="math"]',
+              'pre[data-md-block="code"]',
+              'pre[data-md-block="front-matter"]',
+              'section[data-md-block="link-reference"]'
+            ].join(',');
 
             document.body.classList.toggle('typewriter', initialTypewriter);
 
@@ -651,8 +837,87 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
               return String(value).split(CARET_TOKEN).join('');
             }
 
+            function stripCommentTokens(value) {
+              return String(value).replace(COMMENT_MARKER_PATTERN, '');
+            }
+
+            function stripCollaborationTokens(value) {
+              return String(value).replace(COLLAB_MARKER_PATTERN, '');
+            }
+
+            function stripTransientTokens(value) {
+              return stripCollaborationTokens(stripCommentTokens(stripCaretToken(value)));
+            }
+
+            function stripLeadingCommentMarkers(value) {
+              return String(value || '').replace(new RegExp(`^(?:${COMMENT_MARKER_TOKEN_PATTERN.source})+`), '');
+            }
+
+            function commentMarkerToken(edge, id) {
+              return `${COMMENT_TOKEN_EDGE}simplelime-comment-${edge}:${id}${COMMENT_TOKEN_EDGE}`;
+            }
+
+            function collaborationMarkerToken(edge, id) {
+              return `${COLLAB_TOKEN_EDGE}simplelime-collab-${edge}:${id}${COLLAB_TOKEN_EDGE}`;
+            }
+
+            function markdownWithRenderMarkers(markdown) {
+              let output = String(markdown ?? '');
+              const sourceLength = output.length;
+              const insertions = [];
+
+              activeComments
+                .filter(comment => {
+                  const range = comment?.range || {};
+                  return comment?.id &&
+                    !comment.resolved &&
+                    Number.isFinite(Number(range.location)) &&
+                    Number.isFinite(Number(range.length)) &&
+                    Number(range.length) > 0;
+                })
+                .map(comment => {
+                  const rawStart = Number(comment.range.location);
+                  const start = Math.max(0, Math.min(rawStart, sourceLength));
+                  const end = Math.max(start, Math.min(rawStart + Number(comment.range.length), sourceLength));
+                  return { id: comment.id, start, end };
+                })
+                .filter(range => range.end > range.start)
+                .forEach(range => {
+                  insertions.push({ offset: range.end, token: commentMarkerToken('end', range.id), order: 1 });
+                  insertions.push({ offset: range.start, token: commentMarkerToken('start', range.id), order: 0 });
+                });
+
+              activeCollaborators
+                .filter(collaborator => collaborator?.id && Array.isArray(collaborator.selectionRanges))
+                .forEach(collaborator => {
+                  const range = collaborator.selectionRanges[0] || {};
+                  const rawStart = Number(range.location);
+                  if (!Number.isFinite(rawStart)) return;
+                  const start = Math.max(0, Math.min(rawStart, sourceLength));
+                  const length = Math.max(0, Number(range.length) || 0);
+                  const end = Math.max(start, Math.min(start + length, sourceLength));
+                  if (end > start) {
+                    insertions.push({ offset: end, token: collaborationMarkerToken('end', collaborator.id), order: 3 });
+                    insertions.push({ offset: start, token: collaborationMarkerToken('start', collaborator.id), order: 2 });
+                  } else {
+                    insertions.push({ offset: start, token: collaborationMarkerToken('cursor', collaborator.id), order: 4 });
+                  }
+                });
+
+              insertions.sort((first, second) => {
+                if (first.offset !== second.offset) return second.offset - first.offset;
+                return second.order - first.order;
+              });
+
+              for (const insertion of insertions) {
+                output = output.slice(0, insertion.offset) + insertion.token + output.slice(insertion.offset);
+              }
+
+              return output;
+            }
+
             function parseRawHTMLImage(value) {
-              const trimmed = stripCaretToken(String(value).trim());
+              const trimmed = stripTransientTokens(String(value).trim());
               if (!/^<img\s+/i.test(trimmed) || !/\/?>$/i.test(trimmed)) return null;
 
               const document = new DOMParser().parseFromString(trimmed, 'text/html');
@@ -669,7 +934,7 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             }
 
             function parseRawHTMLMedia(value) {
-              const trimmed = stripCaretToken(String(value).trim());
+              const trimmed = stripTransientTokens(String(value).trim());
               if (!/^<(video|audio|iframe)\s+/i.test(trimmed) || !/<\/(video|audio|iframe)>$/i.test(trimmed)) return null;
 
               const document = new DOMParser().parseFromString(trimmed, 'text/html');
@@ -691,13 +956,15 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             }
 
             function parseMarkdownImageParts(alt, body) {
-              let source = String(body || '').trim();
+              const rawBody = String(body || '').trim();
+              let source = rawBody;
               let title = '';
               const titleMatch = source.match(/^(.*?)(?:\s+"([^"]*)")\s*$/);
               if (titleMatch) {
                 source = titleMatch[1].trim();
                 title = titleMatch[2] || '';
               }
+              source = stripTransientTokens(source).trim();
               if (source.startsWith('<') && source.endsWith('>')) {
                 source = source.slice(1, -1);
               }
@@ -707,11 +974,11 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             }
 
             function normalizeReferenceLabel(value) {
-              return stripCaretToken(String(value || '')).trim().replace(/\s+/g, ' ').toLowerCase();
+              return stripTransientTokens(String(value || '')).trim().replace(/\s+/g, ' ').toLowerCase();
             }
 
             function parseReferenceDefinition(value) {
-              const trimmed = stripCaretToken(String(value || '').trim());
+              const trimmed = stripTransientTokens(String(value || '').trim());
               const match = trimmed.match(/^\[([^\]]+)\]:\s+(.+)$/);
               if (!match) return null;
               if (match[1].startsWith('^')) return null;
@@ -728,9 +995,21 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             }
 
             function parseMarkdownImageLine(value) {
-              const trimmed = stripCaretToken(String(value).trim());
+              const trimmed = String(value).trim();
               const match = trimmed.match(/^!\[([^\]]*)\]\((.*)\)$/);
-              return match ? parseMarkdownImageParts(match[1], match[2]) : null;
+              if (match) return parseMarkdownImageParts(match[1], match[2]);
+
+              const cleanMatch = stripTransientTokens(trimmed).match(/^!\[([^\]]*)\]\((.*)\)$/);
+              return cleanMatch ? parseMarkdownImageParts(cleanMatch[1], cleanMatch[2]) : null;
+            }
+
+            function headingContentForLine(rawLine, level, fallback) {
+              const directMatch = String(rawLine || '').match(new RegExp(`^#{${level}}\\s+([\\s\\S]+)$`));
+              if (directMatch) return directMatch[1];
+
+              const withoutLeadingMarkers = stripLeadingCommentMarkers(rawLine);
+              const shiftedMatch = withoutLeadingMarkers.match(new RegExp(`^#{${level}}\\s+([\\s\\S]+)$`));
+              return shiftedMatch ? shiftedMatch[1] : fallback;
             }
 
             function localImageURL(path) {
@@ -778,13 +1057,20 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
 
             function imageFigureHTML(image, rawHTML = false) {
               const htmlSource = sourceForHTML(image.source);
-              const titleAttr = image.title ? ` title="${escapeAttr(image.title)}"` : '';
-              const styleAttr = image.style ? ` style="${escapeAttr(image.style)}"` : '';
+              const cleanAlt = stripTransientTokens(image.alt || '');
+              const cleanTitle = stripTransientTokens(image.title || '');
+              const cleanStyle = stripTransientTokens(image.style || '');
+              const titleAttr = cleanTitle ? ` title="${escapeAttr(cleanTitle)}"` : '';
+              const styleAttr = cleanStyle ? ` style="${escapeAttr(cleanStyle)}"` : '';
               const rawAttr = rawHTML ? ` data-raw-html="${escapeAttr(image.rawHTML || '')}"` : '';
               const block = rawHTML ? 'html-image' : 'image';
-              const caption = image.title ? `<figcaption>${escapeHtml(image.title)}</figcaption>` : '';
+              let captionSource = image.title || '';
+              if (String(image.alt || '').includes(COMMENT_TOKEN_EDGE) && (!captionSource || stripTransientTokens(captionSource) === cleanAlt)) {
+                captionSource = image.alt || '';
+              }
+              const caption = captionSource ? `<figcaption>${escapeHtml(captionSource)}</figcaption>` : '';
 
-              return `<figure data-md-block="${block}" data-src="${escapeAttr(image.source)}" data-alt="${escapeAttr(image.alt)}" data-title="${escapeAttr(image.title || '')}" data-style="${escapeAttr(image.style || '')}"${rawAttr}><img src="${escapeAttr(htmlSource)}" alt="${escapeAttr(image.alt)}"${titleAttr}${styleAttr}>${caption}</figure>`;
+              return `<figure data-md-block="${block}" data-src="${escapeAttr(stripTransientTokens(image.source || ''))}" data-alt="${escapeAttr(cleanAlt)}" data-title="${escapeAttr(cleanTitle)}" data-style="${escapeAttr(cleanStyle)}"${rawAttr}><img src="${escapeAttr(htmlSource)}" alt="${escapeAttr(cleanAlt)}"${titleAttr}${styleAttr}>${caption}</figure>`;
             }
 
             function mediaFigureHTML(media) {
@@ -795,6 +1081,11 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
               const heightAttr = media.height ? ` height="${escapeAttr(media.height)}"` : '';
               const controlsAttr = media.tag === 'iframe' ? '' : (media.controls ? ' controls' : ' controls');
               return `<figure data-md-block="html-media" data-tag="${escapeAttr(media.tag)}" data-src="${escapeAttr(media.source)}"${rawAttr}><${media.tag} src="${escapeAttr(htmlSource)}"${titleAttr}${widthAttr}${heightAttr}${controlsAttr} contenteditable="false"></${media.tag}></figure>`;
+            }
+
+            function referenceDefinitionHTML(referenceDefinition) {
+              const title = referenceDefinition.title ? ` "${escapeHtml(referenceDefinition.title)}"` : '';
+              return `<section class="link-reference" data-md-block="link-reference" data-label="${escapeAttr(referenceDefinition.label)}" data-src="${escapeAttr(referenceDefinition.source)}" data-title="${escapeAttr(referenceDefinition.title || '')}"><code>[${escapeHtml(referenceDefinition.label)}]: ${escapeHtml(referenceDefinition.source)}${title}</code></section>`;
             }
 
             function imageMarkdown(source, alt = '') {
@@ -808,10 +1099,10 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
               const nextMarkdown = payload.hasCaret
                 ? payload.markdown.replace(CARET_TOKEN, () => insertion + CARET_TOKEN)
                 : `${currentMarkdown()}\\n\\n${insertion}${CARET_TOKEN}`;
-              const changed = stripCaretToken(nextMarkdown) !== lastPostedMarkdown;
+              const changed = stripTransientTokens(nextMarkdown) !== lastPostedMarkdown;
               setMarkdown(nextMarkdown, { preserveCaretToken: true });
               if (changed) {
-                post({ type: 'markdownChanged', markdown: stripCaretToken(nextMarkdown) });
+                post({ type: 'markdownChanged', markdown: stripTransientTokens(nextMarkdown) });
               }
             }
 
@@ -1033,20 +1324,21 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             function isBlockStart(lines, index) {
               const line = lines[index] ?? '';
               const trimmed = line.trim();
+              const cleanTrimmed = stripTransientTokens(trimmed);
               if (!trimmed) return true;
-              if (/^#{1,6}\s+/.test(trimmed)) return true;
-              if (/^([-*_])\s*\1\s*\1\s*$/.test(trimmed)) return true;
-              if (/^>\s?/.test(trimmed)) return true;
+              if (/^#{1,6}\s+/.test(cleanTrimmed)) return true;
+              if (/^([-*_])\s*\1\s*\1\s*$/.test(cleanTrimmed)) return true;
+              if (/^>\s?/.test(cleanTrimmed)) return true;
               if (listItemInfo(line)) return true;
-              if (isFence(trimmed)) return true;
+              if (isFence(cleanTrimmed)) return true;
               if (parseMarkdownImageLine(trimmed)) return true;
               if (parseRawHTMLImage(trimmed)) return true;
               if (parseRawHTMLMedia(trimmed)) return true;
               if (parseReferenceDefinition(trimmed)) return true;
-              if (/^\[\^([^\]]+)\]:\s*/.test(trimmed)) return true;
-              if (trimmed === '$$') return true;
-              if (trimmed.toLowerCase() === '[toc]') return true;
-              if (index === 0 && trimmed === '---') return true;
+              if (/^\[\^([^\]]+)\]:\s*/.test(cleanTrimmed)) return true;
+              if (cleanTrimmed === '$$') return true;
+              if (cleanTrimmed.toLowerCase() === '[toc]') return true;
+              if (index === 0 && cleanTrimmed === '---') return true;
               if (index + 1 < lines.length && isTableDelimiter(lines[index + 1]) && line.includes('|')) return true;
               return false;
             }
@@ -1059,8 +1351,8 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
               activeReferences = new Map();
 
               for (const line of lines) {
-                const match = line.trim().match(/^(#{1,6})\s+(.+)$/);
-                if (match) headings.push({ level: match[1].length, text: match[2] });
+                const match = stripTransientTokens(line.trim()).match(/^(#{1,6})\s+(.+)$/);
+                if (match) headings.push({ level: match[1].length, text: stripTransientTokens(match[2]) });
                 const reference = parseReferenceDefinition(line);
                 if (reference) activeReferences.set(reference.key, reference);
               }
@@ -1068,13 +1360,14 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
               while (i < lines.length) {
                 const line = lines[i] ?? '';
                 const trimmed = line.trim();
+                const cleanTrimmed = stripTransientTokens(trimmed);
 
-                if (i === 0 && stripCaretToken(trimmed) === '---') {
+                if (i === 0 && stripTransientTokens(trimmed) === '---') {
                   const frontMatterStart = i;
                   const yamlLines = [];
                   let frontMatterHasCaret = trimmed.includes(CARET_TOKEN);
                   i += 1;
-                  while (i < lines.length && !['---', '...'].includes(stripCaretToken(lines[i].trim()))) {
+                  while (i < lines.length && !['---', '...'].includes(stripTransientTokens(lines[i].trim()))) {
                     yamlLines.push(lines[i]);
                     i += 1;
                   }
@@ -1095,10 +1388,10 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
                   continue;
                 }
 
-                const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+                const heading = cleanTrimmed.match(/^(#{1,6})\s+(.+)$/);
                 if (heading) {
                   const level = heading[1].length;
-                  blocks.push(`<h${level}>${parseInline(heading[2])}</h${level}>`);
+                  blocks.push(`<h${level}>${parseInline(headingContentForLine(trimmed, level, heading[2]))}</h${level}>`);
                   i += 1;
                   continue;
                 }
@@ -1116,11 +1409,11 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
                   continue;
                 }
 
-                if (stripCaretToken(trimmed) === '$$') {
+                if (stripTransientTokens(trimmed) === '$$') {
                   const mathLines = [];
                   let mathHasCaret = trimmed.includes(CARET_TOKEN);
                   i += 1;
-                  while (i < lines.length && stripCaretToken(lines[i].trim()) !== '$$') {
+                  while (i < lines.length && stripTransientTokens(lines[i].trim()) !== '$$') {
                     mathLines.push(lines[i]);
                     i += 1;
                   }
@@ -1138,7 +1431,7 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
                   let fenceHasCaret = trimmed.includes(CARET_TOKEN);
                   const codeLines = [];
                   i += 1;
-                  while (i < lines.length && !stripCaretToken(lines[i].trim()).startsWith(info.marker)) {
+                  while (i < lines.length && !stripTransientTokens(lines[i].trim()).startsWith(info.marker)) {
                     codeLines.push(lines[i]);
                     i += 1;
                   }
@@ -1181,8 +1474,7 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
 
                 const referenceDefinition = parseReferenceDefinition(trimmed);
                 if (referenceDefinition) {
-                  const title = referenceDefinition.title ? ` "${escapeHtml(referenceDefinition.title)}"` : '';
-                  blocks.push(`<section class="link-reference" data-md-block="link-reference" data-label="${escapeAttr(referenceDefinition.label)}" data-src="${escapeAttr(referenceDefinition.source)}" data-title="${escapeAttr(referenceDefinition.title || '')}"><code>[${escapeHtml(referenceDefinition.label)}]: ${escapeHtml(referenceDefinition.source)}${title}</code></section>`);
+                  blocks.push(referenceDefinitionHTML(referenceDefinition));
                   i += 1;
                   continue;
                 }
@@ -1249,6 +1541,9 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             function serializeInline(node) {
               if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
               if (node.nodeType !== Node.ELEMENT_NODE) return '';
+              if (node.dataset.simplelimeBoundary === 'true' || node.dataset.sourceEditor === 'true') return '';
+              if (node.dataset.commentMarker) return '';
+              if (node.classList?.contains('collab-cursor')) return '';
 
               const tag = node.tagName.toLowerCase();
               if (tag === 'br') return '\n';
@@ -1339,6 +1634,7 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
 
             function blockMarkdown(node) {
               if (node.nodeType !== Node.ELEMENT_NODE) return (node.textContent || '').trim();
+              if (node.dataset.simplelimeBoundary === 'true' || node.dataset.sourceEditor === 'true') return '';
 
               const tag = node.tagName.toLowerCase();
               if (/^h[1-6]$/.test(tag)) {
@@ -1469,12 +1765,359 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             }
 
             function currentMarkdown() {
-              return stripCaretToken(htmlToMarkdown());
+              return stripTransientTokens(htmlToMarkdown());
+            }
+
+            function commentMarkerTextNodes() {
+              const walker = document.createTreeWalker(
+                editor,
+                NodeFilter.SHOW_TEXT,
+                {
+                  acceptNode(node) {
+                    return node.textContent?.includes(COMMENT_TOKEN_EDGE)
+                      ? NodeFilter.FILTER_ACCEPT
+                      : NodeFilter.FILTER_REJECT;
+                  }
+                }
+              );
+
+              const nodes = [];
+              while (walker.nextNode()) {
+                nodes.push(walker.currentNode);
+              }
+              return nodes;
+            }
+
+            function splitCommentMarkerTextNodes() {
+              for (const node of commentMarkerTextNodes()) {
+                const text = node.textContent || '';
+                COMMENT_MARKER_PATTERN.lastIndex = 0;
+                let lastIndex = 0;
+                let match = null;
+                const fragment = document.createDocumentFragment();
+
+                while ((match = COMMENT_MARKER_PATTERN.exec(text)) !== null) {
+                  if (match.index > lastIndex) {
+                    fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+                  }
+
+                  const marker = document.createElement('span');
+                  marker.dataset.commentMarker = match[1];
+                  marker.dataset.commentId = match[2];
+                  marker.hidden = true;
+                  fragment.appendChild(marker);
+                  lastIndex = match.index + match[0].length;
+                }
+
+                if (lastIndex < text.length) {
+                  fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+                }
+
+                node.parentNode?.replaceChild(fragment, node);
+              }
+            }
+
+            function markerElement(kind, id) {
+              return Array.from(editor.querySelectorAll(`span[data-comment-marker="${kind}"]`))
+                .find(marker => marker.dataset.commentId === id) || null;
+            }
+
+            function removeCommentMarkers() {
+              editor.querySelectorAll('span[data-comment-marker]').forEach(marker => marker.remove());
+            }
+
+            function collaborationMarkerTextNodes() {
+              const walker = document.createTreeWalker(
+                editor,
+                NodeFilter.SHOW_TEXT,
+                {
+                  acceptNode(node) {
+                    return node.textContent?.includes(COLLAB_TOKEN_EDGE)
+                      ? NodeFilter.FILTER_ACCEPT
+                      : NodeFilter.FILTER_REJECT;
+                  }
+                }
+              );
+
+              const nodes = [];
+              while (walker.nextNode()) {
+                nodes.push(walker.currentNode);
+              }
+              return nodes;
+            }
+
+            function splitCollaborationMarkerTextNodes() {
+              for (const node of collaborationMarkerTextNodes()) {
+                const text = node.textContent || '';
+                COLLAB_MARKER_PATTERN.lastIndex = 0;
+                let lastIndex = 0;
+                let match = null;
+                const fragment = document.createDocumentFragment();
+
+                while ((match = COLLAB_MARKER_PATTERN.exec(text)) !== null) {
+                  if (match.index > lastIndex) {
+                    fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+                  }
+
+                  const marker = document.createElement('span');
+                  marker.dataset.collabMarker = match[1];
+                  marker.dataset.collabId = match[2];
+                  marker.hidden = true;
+                  fragment.appendChild(marker);
+                  lastIndex = match.index + match[0].length;
+                }
+
+                if (lastIndex < text.length) {
+                  fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+                }
+
+                node.parentNode?.replaceChild(fragment, node);
+              }
+            }
+
+            function collaboratorForID(id) {
+              return activeCollaborators.find(collaborator => collaborator.id === id) || null;
+            }
+
+            function collabMarkerElement(kind, id) {
+              return Array.from(editor.querySelectorAll(`span[data-collab-marker="${kind}"]`))
+                .find(marker => marker.dataset.collabId === id) || null;
+            }
+
+            function removeCollaborationMarkers() {
+              editor.querySelectorAll('span[data-collab-marker]').forEach(marker => marker.remove());
+            }
+
+            function styleCollaborationElement(element, collaborator) {
+              if (!element || !collaborator) return;
+              element.style.setProperty('--collab-color', collaborator.color || '#0a84ff');
+              element.title = collaborator.name || 'Collaborator';
+              element.dataset.collaboratorId = collaborator.id;
+            }
+
+            function activateCollaborationMarkers() {
+              splitCollaborationMarkerTextNodes();
+
+              for (const collaborator of activeCollaborators) {
+                if (!collaborator?.id) continue;
+
+                const cursor = collabMarkerElement('cursor', collaborator.id);
+                if (cursor) {
+                  const span = document.createElement('span');
+                  span.className = 'collab-cursor';
+                  span.textContent = '\u{200B}';
+                  styleCollaborationElement(span, collaborator);
+                  cursor.replaceWith(span);
+                  continue;
+                }
+
+                const start = collabMarkerElement('start', collaborator.id);
+                const end = collabMarkerElement('end', collaborator.id);
+                if (!start || !end) continue;
+
+                const range = document.createRange();
+                range.setStartAfter(start);
+                range.setEndBefore(end);
+                if (range.collapsed) {
+                  start.remove();
+                  end.remove();
+                  continue;
+                }
+
+                const span = document.createElement('span');
+                span.className = 'collab-selection';
+                styleCollaborationElement(span, collaborator);
+                span.appendChild(range.extractContents());
+                range.insertNode(span);
+                start.remove();
+                end.remove();
+              }
+
+              removeCollaborationMarkers();
+            }
+
+            function existingCommentHighlight(id) {
+              return Array.from(editor.querySelectorAll('.comment-highlight[data-comment-id]'))
+                .find(element => element.dataset.commentId === id) || null;
+            }
+
+            function sourceLineAt(markdown, location) {
+              const source = String(markdown || '');
+              const safeLocation = Math.max(0, Math.min(Number(location) || 0, source.length));
+              const start = source.lastIndexOf('\n', Math.max(0, safeLocation - 1)) + 1;
+              const nextBreak = source.indexOf('\n', safeLocation);
+              const end = nextBreak === -1 ? source.length : nextBreak;
+              return { start, end, text: source.slice(start, end) };
+            }
+
+            function normalizedText(value) {
+              return stripTransientTokens(String(value || '')).replace(/\s+/g, ' ').trim();
+            }
+
+            function commentQuoteCandidates(comment) {
+              const quote = normalizedText(comment?.quote);
+              const candidates = [];
+              if (quote) candidates.push(quote);
+
+              const heading = quote.match(/^#{1,6}\s+(.+)$/);
+              if (heading) candidates.push(normalizedText(heading[1]));
+
+              const image = quote.match(/^!\[([^\]]*)\]/);
+              if (image) candidates.push(normalizedText(image[1]));
+
+              return Array.from(new Set(candidates.filter(Boolean)));
+            }
+
+            function makeCommentHighlightSpan(comment) {
+              const span = document.createElement('span');
+              span.className = 'comment-highlight';
+              if (comment.id === activeCommentID) span.classList.add('is-active');
+              span.dataset.commentId = comment.id;
+              return span;
+            }
+
+            function wrapQuoteInElement(element, comment) {
+              if (!element || !comment?.id || existingCommentHighlight(comment.id)) return null;
+              const quoteCandidates = commentQuoteCandidates(comment);
+              if (!quoteCandidates.length) return null;
+
+              const walker = document.createTreeWalker(
+                element,
+                NodeFilter.SHOW_TEXT,
+                {
+                  acceptNode(node) {
+                    if (node.parentElement?.closest?.('[data-md-block="toc"], .comment-highlight, .block-source-editor, [data-simplelime-boundary="true"]')) {
+                      return NodeFilter.FILTER_REJECT;
+                    }
+                    const text = normalizedText(node.textContent);
+                    return quoteCandidates.some(quote => text.includes(quote))
+                      ? NodeFilter.FILTER_ACCEPT
+                      : NodeFilter.FILTER_SKIP;
+                  }
+                }
+              );
+
+              while (walker.nextNode()) {
+                const node = walker.currentNode;
+                const text = node.textContent || '';
+                const quote = quoteCandidates.find(candidate => text.includes(candidate));
+                if (!quote) continue;
+                const index = text.indexOf(quote);
+                if (index < 0) continue;
+
+                const range = document.createRange();
+                range.setStart(node, index);
+                range.setEnd(node, index + quote.length);
+                const span = makeCommentHighlightSpan(comment);
+                span.appendChild(range.extractContents());
+                range.insertNode(span);
+                return span;
+              }
+
+              return null;
+            }
+
+            function headingFallbackTarget(markdown, lineInfo) {
+              const cleanLine = stripTransientTokens(lineInfo.text).trim();
+              const heading = cleanLine.match(/^(#{1,6})\s+(.+)$/);
+              if (!heading) return null;
+
+              const level = heading[1].length;
+              const text = normalizedText(heading[2]);
+              const before = String(markdown || '').slice(0, lineInfo.start).split('\n');
+              const sameBefore = before.filter(line => {
+                const match = stripTransientTokens(line.trim()).match(/^(#{1,6})\s+(.+)$/);
+                return match && match[1].length === level && normalizedText(match[2]) === text;
+              }).length;
+              const candidates = Array.from(editor.querySelectorAll(`h${level}`))
+                .filter(element => !element.closest('[data-md-block="toc"]') && normalizedText(element.textContent) === text);
+              return candidates[sameBefore] || candidates[0] || null;
+            }
+
+            function imageFallbackTarget(markdown, lineInfo, comment) {
+              const image = parseMarkdownImageLine(lineInfo.text.trim()) || parseRawHTMLImage(lineInfo.text.trim());
+              if (!image) return null;
+
+              const before = String(markdown || '').slice(0, lineInfo.start).split('\n');
+              const imageIndex = before.filter(line => {
+                const trimmed = line.trim();
+                return Boolean(parseMarkdownImageLine(trimmed) || parseRawHTMLImage(trimmed));
+              }).length;
+              const figures = Array.from(editor.querySelectorAll('figure[data-md-block="image"], figure[data-md-block="html-image"]'));
+              const figure = figures[imageIndex] || null;
+              if (!figure) return null;
+
+              let caption = figure.querySelector('figcaption');
+              if (!caption) {
+                const candidates = commentQuoteCandidates(comment);
+                const captionText = normalizedText(image.title || image.alt);
+                if (!candidates.some(quote => captionText.includes(quote))) return null;
+                caption = document.createElement('figcaption');
+                caption.textContent = captionText;
+                figure.appendChild(caption);
+              }
+              return caption;
+            }
+
+            function renderFallbackCommentHighlights() {
+              let activeElement = null;
+              const markdown = lastPostedMarkdown;
+
+              for (const comment of activeComments) {
+                if (!comment?.id || comment.resolved || existingCommentHighlight(comment.id)) continue;
+                const range = comment.range || {};
+                if (!Number.isFinite(Number(range.location))) continue;
+
+                const lineInfo = sourceLineAt(markdown, Number(range.location));
+                const target = headingFallbackTarget(markdown, lineInfo) || imageFallbackTarget(markdown, lineInfo, comment);
+                const highlight = wrapQuoteInElement(target, comment);
+                if (highlight && comment.id === activeCommentID) activeElement = highlight;
+              }
+
+              return activeElement;
+            }
+
+            function activateCommentMarkers() {
+              splitCommentMarkerTextNodes();
+              let activeElement = null;
+
+              for (const comment of activeComments) {
+                if (!comment?.id || comment.resolved) continue;
+                const start = markerElement('start', comment.id);
+                const end = markerElement('end', comment.id);
+                if (!start || !end) continue;
+
+                const range = document.createRange();
+                range.setStartAfter(start);
+                range.setEndBefore(end);
+                if (range.collapsed) {
+                  start.remove();
+                  end.remove();
+                  continue;
+                }
+
+                const span = document.createElement('span');
+                span.className = 'comment-highlight';
+                if (comment.id === activeCommentID) span.classList.add('is-active');
+                span.dataset.commentId = comment.id;
+                span.appendChild(range.extractContents());
+                range.insertNode(span);
+                start.remove();
+                end.remove();
+                if (comment.id === activeCommentID) activeElement = span;
+              }
+
+              removeCommentMarkers();
+              activeElement = renderFallbackCommentHighlights() || activeElement;
+              if (activeElement) {
+                window.setTimeout(() => scrollElementIntoView(activeElement), 0);
+              }
             }
 
             function isInlineRootNode(node) {
               if (node.nodeType === Node.TEXT_NODE) return true;
               if (node.nodeType !== Node.ELEMENT_NODE) return false;
+              if (node.dataset.simplelimeBoundary === 'true' || node.dataset.sourceEditor === 'true') return false;
 
               return ['a', 'b', 'br', 'code', 'del', 'em', 'i', 'img', 'kbd', 'mark', 's', 'span', 'strong', 'sub', 'sup', 'u'].includes(node.tagName.toLowerCase());
             }
@@ -1554,6 +2197,7 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
                 }
 
                 if (node.nodeType !== Node.ELEMENT_NODE) return false;
+                if (node.dataset.simplelimeBoundary === 'true' || node.dataset.sourceEditor === 'true') return false;
 
                 const tag = node.tagName.toLowerCase();
                 if (!['p', 'div'].includes(tag)) return false;
@@ -1569,7 +2213,7 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
 
               const caretPayload = markdownWithCaretToken();
               const markdown = caretPayload.markdown;
-              const cleanMarkdown = stripCaretToken(markdown);
+              const cleanMarkdown = stripTransientTokens(markdown);
               if (cleanMarkdown !== lastPostedMarkdown) {
                 lastPostedMarkdown = cleanMarkdown;
                 post({ type: 'markdownChanged', markdown: cleanMarkdown });
@@ -1655,13 +2299,291 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
               }
             }
 
+            function elementFromHTML(value) {
+              const template = document.createElement('template');
+              template.innerHTML = String(value || '').trim();
+              return template.content.firstElementChild;
+            }
+
+            function isAtomicBlockNode(node) {
+              return node?.nodeType === Node.ELEMENT_NODE && node.matches(ATOMIC_BLOCK_SELECTOR);
+            }
+
+            function isBoundaryNode(node) {
+              return node?.nodeType === Node.ELEMENT_NODE && node.dataset.simplelimeBoundary === 'true';
+            }
+
+            function makeAtomicBoundary() {
+              const boundary = document.createElement('span');
+              boundary.dataset.simplelimeBoundary = 'true';
+              boundary.contentEditable = 'true';
+              boundary.setAttribute('aria-hidden', 'true');
+              boundary.textContent = '\u{200B}';
+              return boundary;
+            }
+
+            function prepareAtomicBlocks() {
+              for (const boundary of Array.from(editor.querySelectorAll('[data-simplelime-boundary="true"]'))) {
+                if (!isAtomicBlockNode(boundary.previousSibling) && !isAtomicBlockNode(boundary.nextSibling)) {
+                  boundary.remove();
+                }
+              }
+
+              for (const block of Array.from(editor.querySelectorAll(ATOMIC_BLOCK_SELECTOR))) {
+                if (block.closest('.block-source-editor')) continue;
+                block.dataset.simplelimeAtomic = 'true';
+                block.setAttribute('contenteditable', 'false');
+                block.tabIndex = -1;
+
+                if (!isBoundaryNode(block.previousSibling)) {
+                  block.parentNode?.insertBefore(makeAtomicBoundary(), block);
+                }
+                if (!isBoundaryNode(block.nextSibling)) {
+                  block.parentNode?.insertBefore(makeAtomicBoundary(), block.nextSibling);
+                }
+              }
+            }
+
+            function sourceEditableBlockForNode(node) {
+              const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+              return element?.closest?.(SOURCE_EDITABLE_BLOCK_SELECTOR) || null;
+            }
+
+            function sourceValueForBlock(block) {
+              const tag = block?.tagName?.toLowerCase();
+              const kind = block?.dataset?.mdBlock || '';
+              if (!block) return '';
+
+              if (tag === 'pre') {
+                return (block.textContent || '').replace(/\n$/, '');
+              }
+              if (kind === 'diagram' || kind === 'math') {
+                return (block.querySelector('pre')?.textContent || '').replace(/\n$/, '');
+              }
+              if (kind === 'image' || kind === 'html-image' || kind === 'html-media' || kind === 'link-reference') {
+                return blockMarkdown(block);
+              }
+              return block.textContent || '';
+            }
+
+            function sourceLabelForBlock(block) {
+              const kind = block?.dataset?.mdBlock || '';
+              if (kind === 'diagram') return `${block.dataset.lang || 'mermaid'} source`;
+              if (kind === 'math') return 'math source';
+              if (kind === 'html-image' || kind === 'html-media') return 'html source';
+              if (kind === 'image') return 'image markdown';
+              if (kind === 'front-matter') return 'front matter';
+              if (kind === 'link-reference') return 'reference definition';
+              return `${block?.dataset?.lang || 'code'} source`;
+            }
+
+            function replaceBlockWithHTML(block, html) {
+              const replacement = elementFromHTML(html);
+              if (!replacement) return null;
+              block.replaceWith(replacement);
+              return replacement;
+            }
+
+            function applySourceValueToBlock(block, value) {
+              const source = String(value ?? '').replace(/\r\n/g, '\n');
+              const tag = block?.tagName?.toLowerCase();
+              const kind = block?.dataset?.mdBlock || '';
+
+              if (!block) return null;
+
+              if (tag === 'pre') {
+                const code = block.querySelector('code') || block;
+                code.textContent = source;
+                return block;
+              }
+
+              if (kind === 'diagram') {
+                let sourceNode = block.querySelector('pre');
+                if (!sourceNode) {
+                  sourceNode = document.createElement('pre');
+                  block.prepend(sourceNode);
+                }
+                sourceNode.textContent = source;
+                const target = block.querySelector('.diagram-render');
+                if (target) target.textContent = source.trim() ? 'Rendering Mermaid...' : '';
+                return block;
+              }
+
+              if (kind === 'math') {
+                let sourceNode = block.querySelector('pre');
+                if (!sourceNode) {
+                  sourceNode = document.createElement('pre');
+                  block.prepend(sourceNode);
+                }
+                sourceNode.textContent = source;
+                const target = block.querySelector('.math-render');
+                if (target) target.textContent = source;
+                return block;
+              }
+
+              if (kind === 'image' || kind === 'html-image') {
+                const image = parseMarkdownImageLine(source) || parseRawHTMLImage(source);
+                if (!image) return null;
+                return replaceBlockWithHTML(block, imageFigureHTML(image, Boolean(image.rawHTML)));
+              }
+
+              if (kind === 'html-media') {
+                const media = parseRawHTMLMedia(source);
+                if (!media) return null;
+                return replaceBlockWithHTML(block, mediaFigureHTML(media));
+              }
+
+              if (kind === 'link-reference') {
+                const reference = parseReferenceDefinition(source);
+                if (!reference) return null;
+                return replaceBlockWithHTML(block, referenceDefinitionHTML(reference));
+              }
+
+              return null;
+            }
+
+            function removeBlockSourceEditor(sourceEditor, focusBlock = null) {
+              const block = sourceEditor?.sourceBlock || focusBlock;
+              sourceEditor?.remove();
+              block?.classList.remove('block-source-editing');
+              block?.removeAttribute('aria-label');
+            }
+
+            function commitBlockSourceEditor(sourceEditor) {
+              const block = sourceEditor?.sourceBlock;
+              const textarea = sourceEditor?.querySelector('textarea');
+              if (!block || !textarea) return false;
+
+              const replacement = applySourceValueToBlock(block, textarea.value);
+              if (!replacement) {
+                textarea.classList.add('is-invalid');
+                return false;
+              }
+
+              removeBlockSourceEditor(sourceEditor, replacement);
+              prepareAtomicBlocks();
+              scheduleEnhancementRender();
+              emitMarkdownChanged();
+              placeCaretAroundAtomicBlock(replacement, true);
+              scheduleSelectionChanged();
+              return true;
+            }
+
+            function cancelBlockSourceEditor(sourceEditor) {
+              const block = sourceEditor?.sourceBlock || null;
+              removeBlockSourceEditor(sourceEditor, block);
+              if (block) placeCaretAroundAtomicBlock(block, true);
+              scheduleSelectionChanged();
+              return true;
+            }
+
+            function enterBlockSourceEdit(block) {
+              if (!block || block.classList.contains('block-source-editing')) return false;
+              const existing = editor.querySelector('.block-source-editor');
+              if (existing) commitBlockSourceEditor(existing);
+
+              const sourceEditor = document.createElement('div');
+              sourceEditor.dataset.sourceEditor = 'true';
+              sourceEditor.className = 'block-source-editor';
+              sourceEditor.contentEditable = 'false';
+              sourceEditor.sourceBlock = block;
+
+              const textarea = document.createElement('textarea');
+              textarea.className = 'block-source-textarea';
+              textarea.contentEditable = 'false';
+              textarea.spellcheck = false;
+              textarea.value = sourceValueForBlock(block);
+
+              const actions = document.createElement('div');
+              actions.className = 'block-source-actions';
+              const label = document.createElement('span');
+              label.textContent = sourceLabelForBlock(block);
+              const buttons = document.createElement('span');
+              const cancelButton = document.createElement('button');
+              cancelButton.type = 'button';
+              cancelButton.dataset.action = 'cancel';
+              cancelButton.textContent = 'Cancel';
+              const commitButton = document.createElement('button');
+              commitButton.type = 'button';
+              commitButton.dataset.action = 'commit';
+              commitButton.textContent = 'Apply';
+              buttons.append(cancelButton, commitButton);
+              actions.append(label, buttons);
+              sourceEditor.append(textarea, actions);
+
+              block.classList.add('block-source-editing');
+              block.setAttribute('aria-label', sourceLabelForBlock(block));
+              if (block.parentNode) {
+                block.parentNode.insertBefore(sourceEditor, block.nextSibling);
+              }
+
+              textarea.addEventListener('input', event => {
+                event.stopPropagation();
+                textarea.classList.remove('is-invalid');
+              });
+              textarea.addEventListener('beforeinput', event => event.stopPropagation());
+              textarea.addEventListener('pointerdown', event => event.stopPropagation());
+              textarea.addEventListener('mousedown', event => event.stopPropagation());
+              textarea.addEventListener('click', event => event.stopPropagation());
+              textarea.addEventListener('dblclick', event => event.stopPropagation());
+              textarea.addEventListener('keydown', event => {
+                event.stopPropagation();
+                if (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && (event.key === '/' || event.code === 'Slash')) {
+                  event.preventDefault();
+                  postShortcut('toggleWysiwygMode');
+                } else if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                  event.preventDefault();
+                  commitBlockSourceEditor(sourceEditor);
+                } else if (event.key === 'Escape') {
+                  event.preventDefault();
+                  cancelBlockSourceEditor(sourceEditor);
+                } else if (event.key === 'Tab') {
+                  event.preventDefault();
+                  const start = textarea.selectionStart;
+                  const end = textarea.selectionEnd;
+                  const insertion = event.shiftKey ? '' : '  ';
+                  if (event.shiftKey) {
+                    const lineStart = textarea.value.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+                    if (textarea.value.slice(lineStart, lineStart + 2) === '  ') {
+                      textarea.value = textarea.value.slice(0, lineStart) + textarea.value.slice(lineStart + 2);
+                      textarea.selectionStart = Math.max(lineStart, start - 2);
+                      textarea.selectionEnd = Math.max(textarea.selectionStart, end - 2);
+                    }
+                  } else {
+                    textarea.setRangeText(insertion, start, end, 'end');
+                  }
+                }
+              });
+              sourceEditor.addEventListener('pointerdown', event => {
+                const button = event.target?.closest?.('button[data-action]');
+                if (!button) return;
+                event.preventDefault();
+                if (button.dataset.action === 'commit') {
+                  commitBlockSourceEditor(sourceEditor);
+                } else {
+                  cancelBlockSourceEditor(sourceEditor);
+                }
+              });
+
+              window.setTimeout(() => {
+                textarea.focus({ preventScroll: true });
+                textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+                scrollElementIntoView(sourceEditor);
+              }, 0);
+              return true;
+            }
+
             function renderEnhancements() {
               renderSerial += 1;
+              prepareAtomicBlocks();
               renderMath();
               renderDiagrams(renderSerial);
+              activateCommentMarkers();
+              activateCollaborationMarkers();
             }
 
             function selectionTextOffset() {
+              if (document.activeElement?.closest?.('.block-source-editor')) return null;
               const selection = window.getSelection();
               if (!selection || selection.rangeCount === 0) return null;
 
@@ -1683,23 +2605,30 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
               const prefix = range.cloneRange();
               prefix.selectNodeContents(editor);
               prefix.setEnd(range.startContainer, range.startOffset);
-              return stripCaretToken(prefix.toString()).length;
+              return stripTransientTokens(prefix.toString()).length;
             }
 
-            function atomicSourceFigureForNode(node) {
+            function atomicSourceBlockForNode(node) {
               const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
-              const pre = element?.closest?.('figure[data-md-block="diagram"] > pre, figure[data-md-block="math"] > pre');
-              return pre?.parentElement || null;
+              if (!element || element.closest?.('.block-source-editor, [data-simplelime-boundary="true"]')) return null;
+              const sourceElement = element.closest?.([
+                'figure[data-md-block="diagram"] > pre',
+                'figure[data-md-block="math"] > pre',
+                'pre[data-md-block="code"]',
+                'pre[data-md-block="front-matter"]',
+                'section[data-md-block="link-reference"]'
+              ].join(','));
+              return sourceElement?.closest?.(ATOMIC_BLOCK_SELECTOR) || element.closest?.(ATOMIC_BLOCK_SELECTOR) || null;
             }
 
-            function placeCaretAroundAtomicFigure(figure, after = true) {
-              if (!figure) return false;
+            function placeCaretAroundAtomicBlock(block, after = true) {
+              if (!block) return false;
 
               const range = document.createRange();
               if (after) {
-                range.setStartAfter(figure);
+                range.setStartAfter(block);
               } else {
-                range.setStartBefore(figure);
+                range.setStartBefore(block);
               }
               range.collapse(true);
 
@@ -1707,8 +2636,12 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
               const selection = window.getSelection();
               selection.removeAllRanges();
               selection.addRange(range);
-              scrollElementIntoView(figure);
+              scrollElementIntoView(block);
               return true;
+            }
+
+            function placeCaretAroundAtomicFigure(figure, after = true) {
+              return placeCaretAroundAtomicBlock(figure, after);
             }
 
             function scrollRectIntoView(rect) {
@@ -1762,12 +2695,60 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
               window.setTimeout(run, 0);
             }
 
-            function emitSelectionChanged() {
+            function markdownOffsetForBoundary(originalRange, collapseToStart) {
+              const selection = window.getSelection();
+              if (!selection) return null;
+
+              const wasSettingMarkdown = isSettingMarkdown;
+              const boundaryRange = originalRange.cloneRange();
+              boundaryRange.collapse(collapseToStart);
+              const tokenNode = document.createTextNode(CARET_TOKEN);
+              isSettingMarkdown = true;
+
+              try {
+                boundaryRange.insertNode(tokenNode);
+                const markdown = htmlToMarkdown();
+                const markdownOffset = markdown.indexOf(CARET_TOKEN);
+                return markdownOffset >= 0 ? markdownOffset : null;
+              } finally {
+                tokenNode.parentNode?.removeChild(tokenNode);
+                selection.removeAllRanges();
+                selection.addRange(originalRange);
+                isSettingMarkdown = wasSettingMarkdown;
+              }
+            }
+
+            function selectionTextRange() {
+              if (document.activeElement?.closest?.('.block-source-editor')) return null;
+              const selection = window.getSelection();
+              if (!selection || selection.rangeCount === 0) return null;
+
+              const range = selection.getRangeAt(0);
+              if (!editor.contains(range.startContainer)) return null;
+
+              const originalRange = range.cloneRange();
+              const start = markdownOffsetForBoundary(originalRange, true);
+              const end = markdownOffsetForBoundary(originalRange, false);
+              if (start == null || end == null) {
+                const offset = selectionTextOffset();
+                return offset == null ? null : { location: offset, length: 0 };
+              }
+
+              return {
+                location: Math.max(0, Math.min(start, end)),
+                length: Math.max(0, Math.abs(end - start))
+              };
+            }
+
+            function emitSelectionChanged(force = false) {
               if (isSettingMarkdown) return;
-              const offset = selectionTextOffset();
-              if (offset == null || offset === lastPostedSelectionOffset) return;
-              lastPostedSelectionOffset = offset;
-              post({ type: 'selectionChanged', location: offset });
+              const range = selectionTextRange();
+              if (!range) return;
+              const signature = `${range.location}:${range.length}`;
+              if (!force && signature === lastPostedSelectionSignature) return;
+              lastPostedSelectionSignature = signature;
+              lastPostedSelectionOffset = range.location;
+              post({ type: 'selectionChanged', location: range.location, length: range.length });
             }
 
             function scheduleSelectionChanged() {
@@ -1782,6 +2763,9 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
                 {
                   acceptNode(node) {
                     const parent = node.parentElement;
+                    if (parent?.closest?.('[data-simplelime-boundary="true"], .block-source-editor')) {
+                      return NodeFilter.FILTER_REJECT;
+                    }
                     if (parent?.closest?.('.diagram-render, .math-render')) {
                       return NodeFilter.FILTER_REJECT;
                     }
@@ -1798,8 +2782,8 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
                 const length = node.textContent.length;
 
                 if (remaining <= length) {
-                  const atomicFigure = atomicSourceFigureForNode(node);
-                  if (atomicFigure && placeCaretAroundAtomicFigure(atomicFigure, remaining > 0)) {
+                  const atomicBlock = atomicSourceBlockForNode(node);
+                  if (atomicBlock && placeCaretAroundAtomicBlock(atomicBlock, remaining > 0)) {
                     lastRestoredCaretOffset = targetOffset - remaining + Math.min(remaining, length);
                     lastPostedSelectionOffset = lastRestoredCaretOffset;
                     return;
@@ -1894,16 +2878,19 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
 
               while (walker.nextNode()) {
                 const node = walker.currentNode;
+                if (node.parentElement?.closest?.('[data-simplelime-boundary="true"], .block-source-editor')) {
+                  continue;
+                }
                 const index = node.textContent.indexOf(CARET_TOKEN);
                 if (index === -1) {
-                  consumed += stripCaretToken(node.textContent).length;
+                  consumed += stripTransientTokens(node.textContent).length;
                   continue;
                 }
 
                 node.textContent = node.textContent.split(CARET_TOKEN).join('');
                 const safeIndex = Math.min(index, node.textContent.length);
-                const atomicFigure = atomicSourceFigureForNode(node);
-                if (atomicFigure && placeCaretAroundAtomicFigure(atomicFigure, true)) {
+                const atomicBlock = atomicSourceBlockForNode(node);
+                if (atomicBlock && placeCaretAroundAtomicBlock(atomicBlock, true)) {
                   lastRestoredCaretOffset = consumed + safeIndex;
                   lastPostedSelectionOffset = lastRestoredCaretOffset;
                   return true;
@@ -1929,9 +2916,12 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             function setMarkdown(markdown, options = {}) {
               const selectionOffset = options.preserveSelection ? selectionTextOffset() : null;
               const markdownForRender = String(markdown);
-              const cleanMarkdown = stripCaretToken(markdownForRender);
+              const cleanMarkdown = stripTransientTokens(markdownForRender);
+              const decoratedMarkdown = options.preserveCaretToken
+                ? markdownForRender
+                : markdownWithRenderMarkers(markdownForRender);
               isSettingMarkdown = true;
-              editor.innerHTML = markdownToHtml(markdownForRender);
+              editor.innerHTML = markdownToHtml(decoratedMarkdown);
               lastPostedMarkdown = cleanMarkdown;
               renderEnhancements();
               isSettingMarkdown = false;
@@ -2287,6 +3277,122 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
               return insertListItemAfter(li);
             }
 
+            function nearestAtomicSibling(startNode, forward) {
+              let node = startNode;
+              while (node) {
+                if (isAtomicBlockNode(node)) return node;
+                if (isBoundaryNode(node) || (node.nodeType === Node.TEXT_NODE && !(node.textContent || '').trim())) {
+                  node = forward ? node.nextSibling : node.previousSibling;
+                  continue;
+                }
+                return null;
+              }
+              return null;
+            }
+
+            function topLevelEditorChildForNode(node) {
+              let current = node?.nodeType === Node.TEXT_NODE ? node.parentNode : node;
+              while (current && current.parentNode !== editor) {
+                current = current.parentNode;
+              }
+              return current?.parentNode === editor ? current : null;
+            }
+
+            function caretAtEdgeOfBlock(range, block, forward) {
+              if (!range || !block) return false;
+              const probe = range.cloneRange();
+              probe.selectNodeContents(block);
+              if (forward) {
+                probe.setStart(range.startContainer, range.startOffset);
+              } else {
+                probe.setEnd(range.startContainer, range.startOffset);
+              }
+              return probe.toString().replace(/\u200B/g, '').length === 0;
+            }
+
+            function atomicBlockAfterCaret(range) {
+              if (!range) return null;
+              const node = range.startContainer;
+              if (node === editor) {
+                return nearestAtomicSibling(editor.childNodes[range.startOffset] || null, true);
+              }
+
+              const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+              if (isBoundaryNode(element)) {
+                return nearestAtomicSibling(element.nextSibling, true);
+              }
+
+              const sourceBlock = sourceEditableBlockForNode(node);
+              if (sourceBlock) return sourceBlock;
+
+              const topLevel = topLevelEditorChildForNode(node);
+              if (topLevel && !isAtomicBlockNode(topLevel) && caretAtEdgeOfBlock(range, topLevel, true)) {
+                return nearestAtomicSibling(topLevel.nextSibling, true);
+              }
+
+              return null;
+            }
+
+            function atomicBlockBeforeCaret(range) {
+              if (!range) return null;
+              const node = range.startContainer;
+              if (node === editor) {
+                return nearestAtomicSibling(editor.childNodes[Math.max(0, range.startOffset - 1)] || null, false);
+              }
+
+              const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+              if (isBoundaryNode(element)) {
+                return nearestAtomicSibling(element.previousSibling, false);
+              }
+
+              const sourceBlock = sourceEditableBlockForNode(node);
+              if (sourceBlock) return sourceBlock;
+
+              const topLevel = topLevelEditorChildForNode(node);
+              if (topLevel && !isAtomicBlockNode(topLevel) && caretAtEdgeOfBlock(range, topLevel, false)) {
+                return nearestAtomicSibling(topLevel.previousSibling, false);
+              }
+
+              return null;
+            }
+
+            function handleAtomicKeydown(event) {
+              const selection = window.getSelection();
+              const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+              if (!range || !range.collapsed) return false;
+
+              if ((event.key === 'Enter' || event.key === 'NumpadEnter') && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
+                const block = sourceEditableBlockForNode(event.target) || atomicBlockAfterCaret(range) || atomicBlockBeforeCaret(range);
+                if (block && sourceEditableBlockForNode(block)) {
+                  event.preventDefault();
+                  enterBlockSourceEdit(block);
+                  return true;
+                }
+              }
+
+              if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+                const block = atomicBlockAfterCaret(range);
+                if (block) {
+                  event.preventDefault();
+                  placeCaretAroundAtomicBlock(block, true);
+                  scheduleSelectionChanged();
+                  return true;
+                }
+              }
+
+              if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+                const block = atomicBlockBeforeCaret(range);
+                if (block) {
+                  event.preventDefault();
+                  placeCaretAroundAtomicBlock(block, false);
+                  scheduleSelectionChanged();
+                  return true;
+                }
+              }
+
+              return false;
+            }
+
             function handleListKeydown(event) {
               const key = event.key;
 
@@ -2401,7 +3507,8 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
               post({ type: 'shortcut', name });
             }
 
-            editor.addEventListener('input', () => {
+            editor.addEventListener('input', event => {
+              if (event.target?.closest?.('.block-source-editor')) return;
               ensureTaskCheckboxes();
               scheduleEnhancementRender();
               scheduleMarkdownNormalization();
@@ -2418,6 +3525,11 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             });
 
             editor.addEventListener('pointerdown', event => {
+              const comment = event.target?.closest?.('.comment-highlight[data-comment-id]');
+              if (comment?.dataset.commentId) {
+                post({ type: 'commentSelected', id: comment.dataset.commentId });
+              }
+
               const cell = event.target?.closest?.('td, th');
               if (cell) {
                 activeTableCell = cell;
@@ -2426,6 +3538,14 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
                 activeTableCell = null;
                 updateTableToolbar();
               }
+            });
+
+            editor.addEventListener('dblclick', event => {
+              if (event.target?.closest?.('.block-source-editor')) return;
+              const block = sourceEditableBlockForNode(event.target);
+              if (!block) return;
+              event.preventDefault();
+              enterBlockSourceEdit(block);
             });
 
             editor.addEventListener('paste', event => {
@@ -2454,6 +3574,7 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             });
 
             document.addEventListener('selectionchange', () => {
+              if (document.activeElement?.closest?.('.block-source-editor')) return;
               if (document.activeElement === editor || editor.contains(document.activeElement)) {
                 updateTableToolbar();
                 scheduleSelectionChanged();
@@ -2461,9 +3582,17 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             });
 
             editor.addEventListener('keydown', event => {
+              if (event.target?.closest?.('.block-source-editor')) return;
+              if (handleAtomicKeydown(event)) return;
               if (handleListKeydown(event)) return;
 
               const key = event.key.toLowerCase();
+
+              if (key === 'escape') {
+                event.preventDefault();
+                postShortcut('escape');
+                return;
+              }
 
               if (event.metaKey && !event.ctrlKey && !event.altKey && key === 'b') {
                 event.preventDefault();
@@ -2503,6 +3632,7 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
                 }
 
                 const shortcuts = {
+                  c: 'addComment',
                   d: 'toggleDocumentCatalog',
                   p: 'toggleMarkdownPreview',
                   o: 'toggleMarkdownOutline',
@@ -2513,12 +3643,19 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
                 };
                 if (shortcuts[key]) {
                   event.preventDefault();
+                  if (shortcuts[key] === 'addComment') emitSelectionChanged(true);
                   postShortcut(shortcuts[key]);
                   return;
                 }
               }
 
               if (event.metaKey && !event.ctrlKey && !event.altKey) {
+                if (!event.shiftKey && (key === '/' || event.code === 'Slash')) {
+                  event.preventDefault();
+                  postShortcut('toggleWysiwygMode');
+                  return;
+                }
+
                 if (event.shiftKey && key === 'f') {
                   event.preventDefault();
                   postShortcut('showGlobalFind');
@@ -2548,6 +3685,20 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             window.simplelimeSetSelectionOffset = function(offset) {
               setSelectionTextOffset(offset);
             };
+            window.simplelimeSetComments = function(comments, selectedID) {
+              activeComments = Array.isArray(comments) ? comments : [];
+              activeCommentID = selectedID || '';
+              setMarkdown(currentMarkdown(), { preserveSelection: true });
+            };
+            window.simplelimeSetCollaborators = function(collaborators) {
+              activeCollaborators = Array.isArray(collaborators) ? collaborators : [];
+              setMarkdown(currentMarkdown(), { preserveSelection: true });
+            };
+            window.simplelimeAddCommentFromContextMenu = function() {
+              emitSelectionChanged(true);
+              postShortcut('addComment');
+              return true;
+            };
             window.simplelimeReceiveSavedImage = receiveSavedImage;
 
             window.simplelimeCommand = simplelimeCommand;
@@ -2561,6 +3712,37 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
               editorHTML() {
                 return editor.innerHTML;
               },
+              atomicBoundaryCount() {
+                return editor.querySelectorAll('[data-simplelime-boundary="true"]').length;
+              },
+              enterBlockSourceEdit(selector) {
+                const block = editor.querySelector(selector);
+                return enterBlockSourceEdit(block);
+              },
+              activeBlockSourceValue() {
+                return editor.querySelector('.block-source-textarea')?.value || '';
+              },
+              setActiveBlockSourceValue(value) {
+                const textarea = editor.querySelector('.block-source-textarea');
+                if (!textarea) return false;
+                textarea.value = String(value ?? '');
+                textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                return true;
+              },
+              commitActiveBlockSourceEdit() {
+                const sourceEditor = editor.querySelector('.block-source-editor');
+                return commitBlockSourceEditor(sourceEditor);
+              },
+              cancelActiveBlockSourceEdit() {
+                const sourceEditor = editor.querySelector('.block-source-editor');
+                return cancelBlockSourceEditor(sourceEditor);
+              },
+              setCaretBeforeBlock(selector) {
+                return placeCaretAroundAtomicBlock(editor.querySelector(selector), false);
+              },
+              setCaretAfterBlock(selector) {
+                return placeCaretAroundAtomicBlock(editor.querySelector(selector), true);
+              },
               lastRestoredCaretOffset() {
                 return lastRestoredCaretOffset;
               },
@@ -2569,7 +3751,7 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
                 editor.innerText = String(value) + CARET_TOKEN;
                 isSettingMarkdown = false;
                 const markdown = htmlToMarkdown();
-                lastPostedMarkdown = stripCaretToken(markdown);
+                lastPostedMarkdown = stripTransientTokens(markdown);
                 setMarkdown(markdown, { preserveCaretToken: true });
               },
               normalizeMarkdownIfNeeded,
@@ -2595,6 +3777,13 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
                 return true;
               },
               selectionTextOffset,
+              selectionTextRange,
+              commentHighlightCount() {
+                return editor.querySelectorAll('.comment-highlight[data-comment-id]').length;
+              },
+              setComments(comments, selectedID = '') {
+                window.simplelimeSetComments(comments, selectedID);
+              },
               setCaretToEnd() {
                 setSelectionTextOffset(Number.MAX_SAFE_INTEGER);
               },
@@ -2656,6 +3845,50 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
         }
 
         return "\"\""
+    }
+
+    private static func commentsJavaScriptLiteral(_ comments: [DocumentComment]) -> String {
+        let payload: [[String: Any]] = comments.map { comment in
+            [
+                "id": comment.id.uuidString,
+                "quote": comment.quote,
+                "resolved": comment.isResolved,
+                "range": [
+                    "location": comment.range.location,
+                    "length": comment.range.length
+                ]
+            ]
+        }
+
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+              let encoded = String(data: data, encoding: .utf8) else {
+            return "[]"
+        }
+
+        return encoded
+    }
+
+    private static func collaboratorsJavaScriptLiteral(_ collaborators: [RemoteCollaborator]) -> String {
+        let payload: [[String: Any]] = collaborators.map { collaborator in
+            [
+                "id": collaborator.deviceID,
+                "name": collaborator.name,
+                "color": collaborator.cssColor,
+                "selectionRanges": collaborator.selectionRanges.map { range in
+                    [
+                        "location": range.location,
+                        "length": range.length
+                    ]
+                }
+            ]
+        }
+
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+              let encoded = String(data: data, encoding: .utf8) else {
+            return "[]"
+        }
+
+        return encoded
     }
 
     static func savePastedImage(dataURL: String, originalName: String, mimeType: String, baseURL: URL?) throws -> String {
@@ -2735,9 +3968,14 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
         weak var webView: WKWebView?
         var lastAppliedMarkdown = ""
         var lastAppliedSelectionRanges: [TextRange] = []
+        var lastAppliedComments: [DocumentComment] = []
+        var lastAppliedActiveCommentID: UUID?
+        var lastAppliedCollaborators: [RemoteCollaborator] = []
         private var isLoaded = false
         private var pendingMarkdown: String?
         private var pendingSelectionRanges: [TextRange]?
+        private var pendingComments: ([DocumentComment], UUID?)?
+        private var pendingCollaborators: [RemoteCollaborator]?
 
         init(_ parent: MarkdownWYSIWYGEditorView) {
             self.parent = parent
@@ -2752,6 +3990,18 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             if let pendingSelectionRanges {
                 self.pendingSelectionRanges = nil
                 applySelectionIfNeeded(pendingSelectionRanges, force: true)
+            }
+            if let pendingComments {
+                self.pendingComments = nil
+                applyCommentsIfNeeded(pendingComments.0, activeCommentID: pendingComments.1, force: true)
+            } else {
+                applyCommentsIfNeeded(parent.comments, activeCommentID: parent.activeCommentID, force: true)
+            }
+            if let pendingCollaborators {
+                self.pendingCollaborators = nil
+                applyCollaboratorsIfNeeded(pendingCollaborators, force: true)
+            } else {
+                applyCollaboratorsIfNeeded(parent.collaborators, force: true)
             }
             applyEditorOptions(fontSize: parent.fontSize, typewriterModeEnabled: parent.typewriterModeEnabled)
         }
@@ -2781,7 +4031,17 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
                 } else {
                     return
                 }
-                let selection = [TextRange(location: min(max(0, location), parent.text.utf16.count), length: 0)]
+                let length: Int
+                if let value = payload["length"] as? Int {
+                    length = value
+                } else if let value = payload["length"] as? NSNumber {
+                    length = value.intValue
+                } else {
+                    length = 0
+                }
+                let safeLocation = min(max(0, location), parent.text.utf16.count)
+                let safeLength = min(max(0, length), max(0, parent.text.utf16.count - safeLocation))
+                let selection = [TextRange(location: safeLocation, length: safeLength)]
                 guard selection != lastAppliedSelectionRanges else { return }
                 lastAppliedSelectionRanges = selection
                 parent.selectionRanges = selection
@@ -2792,6 +4052,13 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
 
             case "savePastedImage":
                 savePastedImage(from: payload)
+
+            case "commentSelected":
+                guard let rawID = payload["id"] as? String,
+                      let commentID = UUID(uuidString: rawID) else {
+                    return
+                }
+                parent.onSelectComment(commentID)
 
             default:
                 break
@@ -2818,7 +4085,8 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             guard force || selectionRanges != lastAppliedSelectionRanges else { return }
 
             let location = min(max(0, selectionRanges.first?.location ?? 0), parent.text.utf16.count)
-            lastAppliedSelectionRanges = [TextRange(location: location, length: 0)]
+            let length = min(max(0, selectionRanges.first?.length ?? 0), max(0, parent.text.utf16.count - location))
+            lastAppliedSelectionRanges = [TextRange(location: location, length: length)]
             let script = "window.simplelimeSetSelectionOffset(\(location));"
             webView?.evaluateJavaScript(script)
         }
@@ -2831,6 +4099,48 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
             let script = """
             window.simplelimeSetFontSize(\(safeFontSize));
             window.simplelimeSetTypewriter(\(typewriter));
+            """
+            webView?.evaluateJavaScript(script)
+        }
+
+        func applyCommentsIfNeeded(
+            _ comments: [DocumentComment],
+            activeCommentID: UUID?,
+            force: Bool = false
+        ) {
+            guard isLoaded else {
+                pendingComments = (comments, activeCommentID)
+                return
+            }
+            guard force || comments != lastAppliedComments || activeCommentID != lastAppliedActiveCommentID else {
+                return
+            }
+
+            lastAppliedComments = comments
+            lastAppliedActiveCommentID = activeCommentID
+            let script = """
+            window.simplelimeSetComments(
+              \(MarkdownWYSIWYGEditorView.commentsJavaScriptLiteral(comments)),
+              \(MarkdownWYSIWYGEditorView.javaScriptLiteral(activeCommentID?.uuidString ?? ""))
+            );
+            """
+            webView?.evaluateJavaScript(script)
+        }
+
+        func applyCollaboratorsIfNeeded(_ collaborators: [RemoteCollaborator], force: Bool = false) {
+            guard isLoaded else {
+                pendingCollaborators = collaborators
+                return
+            }
+            guard force || collaborators != lastAppliedCollaborators else {
+                return
+            }
+
+            lastAppliedCollaborators = collaborators
+            let script = """
+            window.simplelimeSetCollaborators(
+              \(MarkdownWYSIWYGEditorView.collaboratorsJavaScriptLiteral(collaborators))
+            );
             """
             webView?.evaluateJavaScript(script)
         }
@@ -2887,6 +4197,10 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
                 parent.onShortcut(.toggleTypewriterMode)
             case "toggleMiniMap":
                 parent.onShortcut(.toggleMiniMap)
+            case "addComment":
+                parent.onShortcut(.addComment)
+            case "toggleCommentsPanel":
+                parent.onShortcut(.toggleCommentsPanel)
             default:
                 break
             }
@@ -2932,6 +4246,41 @@ struct MarkdownWYSIWYGEditorView: NSViewRepresentable {
 private final class MarkdownWYSIWYGWebView: WKWebView {
     var shortcutHandler: ((EditorShortcut) -> Bool)?
 
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event) ?? NSMenu()
+        installAddCommentMenuItem(in: menu)
+        return menu
+    }
+
+    private func installAddCommentMenuItem(in menu: NSMenu) {
+        let action = #selector(addCommentFromContextMenu(_:))
+        if menu.items.contains(where: { $0.action == action }) {
+            return
+        }
+
+        let item = NSMenuItem(title: "Add Comment", action: action, keyEquivalent: "")
+        item.target = self
+        item.isEnabled = true
+
+        let copyIndex = menu.items.firstIndex { $0.action == #selector(NSText.copy(_:)) }
+        let insertionIndex = min((copyIndex.map { $0 + 1 } ?? 0), menu.items.count)
+        if insertionIndex > 0 && insertionIndex < menu.items.count {
+            menu.insertItem(NSMenuItem.separator(), at: insertionIndex)
+            menu.insertItem(item, at: insertionIndex + 1)
+        } else {
+            menu.insertItem(item, at: insertionIndex)
+            menu.insertItem(NSMenuItem.separator(), at: min(insertionIndex + 1, menu.items.count))
+        }
+    }
+
+    @objc private func addCommentFromContextMenu(_ sender: Any?) {
+        evaluateJavaScript("window.simplelimeAddCommentFromContextMenu && window.simplelimeAddCommentFromContextMenu();") { [weak self] _, error in
+            if error != nil {
+                _ = self?.shortcutHandler?(.addComment)
+            }
+        }
+    }
+
     @IBAction override func performTextFinderAction(_ sender: Any?) {
         let title = (sender as? NSMenuItem)?.title.lowercased() ?? ""
         if title.contains("previous") {
@@ -2952,6 +4301,8 @@ private final class MarkdownWYSIWYGWebView: WKWebView {
 
         let shortcut: EditorShortcut?
         switch event.keyCode {
+        case 44 where !flags.contains(.option) && !flags.contains(.shift):
+            shortcut = .toggleWysiwygMode
         case 18 where flags.contains(.option):
             shortcut = .showSourceMode
         case 19 where flags.contains(.option):
@@ -3021,10 +4372,6 @@ private final class MarkdownWYSIWYGWebView: WKWebView {
             if shortcutHandler?(shortcut) == true {
                 return
             }
-        }
-
-        if event.keyCode == 53, shortcutHandler?(.escape) == true {
-            return
         }
 
         super.keyDown(with: event)

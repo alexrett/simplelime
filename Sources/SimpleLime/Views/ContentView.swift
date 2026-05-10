@@ -197,6 +197,12 @@ struct ContentView: View {
         }
 
         switch event.keyCode {
+        case 44 where !flags.contains(.option) && !flags.contains(.shift):
+            if store.selectedBuffer?.language.isMarkdown == true {
+                store.toggleWysiwygMode()
+                return nil
+            }
+            return event
         case 18 where flags.contains(.option):
             store.showSourceMode()
             return nil
@@ -247,6 +253,12 @@ struct ContentView: View {
             return nil
         case 2 where flags.contains(.option):
             store.toggleDocumentCatalog()
+            return nil
+        case 8 where flags.contains(.option):
+            if store.isWysiwygModeEnabled {
+                return event
+            }
+            store.addCommentToSelection()
             return nil
         case 2 where flags.contains(.shift):
             store.performTextTransform(.duplicateLine)
@@ -386,8 +398,11 @@ private struct CommandPaletteOverlay: View {
             PaletteCommand("Markdown Source Mode", shortcut: "⌥⌘1", keywords: "source markdown editor raw") { store.showSourceMode() },
             PaletteCommand("Markdown Preview Split", shortcut: "⌥⌘2", keywords: "typora preview markdown split") { store.showMarkdownPreviewMode() },
             PaletteCommand("Markdown WYSIWYG Mode", shortcut: "⌥⌘3", keywords: "typora wysiwyg live preview markdown editor") { store.showMarkdownWysiwygMode() },
+            PaletteCommand("Toggle Source/WYSIWYG", shortcut: "⌘/", keywords: "markdown typora source wysiwyg mode") { store.toggleWysiwygMode() },
             PaletteCommand("Toggle Markdown Outline", shortcut: "⌥⌘O", keywords: "typora outline markdown") { store.toggleMarkdownOutline() },
             PaletteCommand("Toggle Documents Sidebar", shortcut: "⌥⌘D", keywords: "folder project catalog documents sidebar sublime") { store.toggleDocumentCatalog() },
+            PaletteCommand("Add Comment", shortcut: "⌥⌘C", keywords: "comment annotation note review google docs") { store.addCommentToSelection() },
+            PaletteCommand("Toggle Comments", shortcut: nil, keywords: "comment annotation note review google docs") { store.toggleCommentsPanel() },
             PaletteCommand("Toggle Minimap", shortcut: "⌥⌘4", keywords: "sublime minimap overview") { store.toggleMiniMap() },
             PaletteCommand("Toggle Focus Mode", shortcut: "⌥⌘F", keywords: "focus writing") { store.toggleFocusMode() },
             PaletteCommand("Toggle Typewriter Mode", shortcut: "⌥⌘T", keywords: "typewriter writing") { store.toggleTypewriterMode() },
@@ -407,7 +422,7 @@ private struct CommandPaletteOverlay: View {
             PaletteCommand("Delete Line", shortcut: nil, keywords: "line sublime") { store.performEditorCommand(.deleteLine) },
             PaletteCommand("Indent Lines", shortcut: "⌘]", keywords: "line") { store.performEditorCommand(.indentLines) },
             PaletteCommand("Outdent Lines", shortcut: "⌘[", keywords: "line") { store.performEditorCommand(.outdentLines) },
-            PaletteCommand("Toggle Comment", shortcut: "⌘/", keywords: "line code") { store.performEditorCommand(.toggleComment) },
+            PaletteCommand("Toggle Comment", shortcut: nil, keywords: "line code") { store.performEditorCommand(.toggleComment) },
             PaletteCommand("Bold", shortcut: "⌘B", keywords: "markdown typora") { store.performMarkdownCommand(.bold) },
             PaletteCommand("Italic", shortcut: "⌘I", keywords: "markdown typora") { store.performMarkdownCommand(.italic) },
             PaletteCommand("Inline Code", shortcut: nil, keywords: "markdown typora") { store.performMarkdownCommand(.inlineCode) },

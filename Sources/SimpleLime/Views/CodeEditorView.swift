@@ -9,7 +9,10 @@ struct CodeEditorView: NSViewRepresentable {
     var language: EditorLanguage
     var fontSize: Double
     var wrapsLines: Bool
+    var focusModeEnabled: Bool
+    var typewriterModeEnabled: Bool
     var onShortcut: (EditorShortcut) -> Void
+    var onVisibleLineRangeChange: (ClosedRange<Int>) -> Void
     var onRegisterEditorCommandHandler: (@escaping (EditorCommand) -> Bool) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -43,11 +46,22 @@ struct CodeEditorView: NSViewRepresentable {
         textView.isContinuousSpellCheckingEnabled = false
         textView.isGrammarCheckingEnabled = false
         textView.text = text
+        textView.currentLanguage = language
+        textView.focusModeEnabled = focusModeEnabled
+        textView.typewriterModeEnabled = typewriterModeEnabled
 
         registerCommandHandler(for: textView)
-        configure(textView: textView, in: scrollView, wrapsLines: wrapsLines, fontSize: CGFloat(fontSize))
+        configure(
+            textView: textView,
+            in: scrollView,
+            wrapsLines: wrapsLines,
+            fontSize: CGFloat(fontSize),
+            typewriterModeEnabled: typewriterModeEnabled
+        )
         applySyntaxHighlighting(to: textView, language: language, fontSize: CGFloat(fontSize))
         applySelection(selectionRanges, to: textView)
+        context.coordinator.observeVisibleRange(in: scrollView, textView: textView)
+        context.coordinator.publishVisibleLineRange(from: textView)
 
         return scrollView
     }
@@ -70,24 +84,54 @@ struct CodeEditorView: NSViewRepresentable {
             context.coordinator.parent.onShortcut(shortcut)
             return true
         }
+        if textView.currentLanguage != language ||
+            textView.focusModeEnabled != focusModeEnabled {
+            textView.needsSyntaxHighlight = true
+        }
+        let shouldCenterForTypewriter = !textView.typewriterModeEnabled && typewriterModeEnabled
+        textView.currentLanguage = language
+        textView.focusModeEnabled = focusModeEnabled
+        textView.typewriterModeEnabled = typewriterModeEnabled
         registerCommandHandler(for: textView)
-        configure(textView: textView, in: scrollView, wrapsLines: wrapsLines, fontSize: CGFloat(fontSize))
+        configure(
+            textView: textView,
+            in: scrollView,
+            wrapsLines: wrapsLines,
+            fontSize: CGFloat(fontSize),
+            typewriterModeEnabled: typewriterModeEnabled
+        )
         applySyntaxHighlighting(to: textView, language: language, fontSize: CGFloat(fontSize))
         applySelection(selectionRanges, to: textView)
+        context.coordinator.observeVisibleRange(in: scrollView, textView: textView)
+        context.coordinator.publishVisibleLineRange(from: textView)
+
+        if shouldCenterForTypewriter {
+            textView.centerSelectionForTypewriterModeIfNeeded(immediate: true)
+        }
     }
 
     private func configure(
         textView: EditorTextView,
         in scrollView: NSScrollView,
         wrapsLines: Bool,
-        fontSize: CGFloat
+        fontSize: CGFloat,
+        typewriterModeEnabled: Bool
     ) {
         let baseFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         let lineHighlightColor = NSColor.controlAccentColor.withAlphaComponent(0.10)
+        let typewriterInset = typewriterModeEnabled
+            ? max(160, floor(scrollView.bounds.height * 0.45))
+            : 0
 
         scrollView.hasHorizontalScroller = !wrapsLines
         scrollView.drawsBackground = true
         scrollView.backgroundColor = .textBackgroundColor
+        scrollView.contentView.contentInsets = NSEdgeInsets(
+            top: typewriterInset,
+            left: 0,
+            bottom: typewriterInset,
+            right: 0
+        )
 
         textView.backgroundColor = .textBackgroundColor
         textView.insertionPointColor = .controlAccentColor
@@ -146,14 +190,66 @@ struct CodeEditorView: NSViewRepresentable {
         if selectionRanges.count > 1, textView.editorSelectionRanges != selectionRanges {
             textView.setEditorSelectionRanges(selectionRanges)
         }
+
+        textView.updateFocusModeDimming()
     }
 
     final class Coordinator: NSObject, STTextViewDelegate {
         var parent: CodeEditorView
         var isApplyingExternalUpdate = false
+        private weak var observedTextView: EditorTextView?
+        private weak var observedContentView: NSClipView?
+        private var lastVisibleLineRange: ClosedRange<Int>?
 
         init(_ parent: CodeEditorView) {
             self.parent = parent
+        }
+
+        deinit {
+            if let observedContentView {
+                NotificationCenter.default.removeObserver(
+                    self,
+                    name: NSView.boundsDidChangeNotification,
+                    object: observedContentView
+                )
+            }
+        }
+
+        func observeVisibleRange(in scrollView: NSScrollView, textView: EditorTextView) {
+            observedTextView = textView
+            guard observedContentView !== scrollView.contentView else { return }
+
+            if let observedContentView {
+                NotificationCenter.default.removeObserver(
+                    self,
+                    name: NSView.boundsDidChangeNotification,
+                    object: observedContentView
+                )
+            }
+
+            observedContentView = scrollView.contentView
+            scrollView.contentView.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(visibleBoundsDidChange),
+                name: NSView.boundsDidChangeNotification,
+                object: scrollView.contentView
+            )
+        }
+
+        func publishVisibleLineRange(from textView: EditorTextView) {
+            let visibleLineRange = textView.visibleSourceLineRange()
+            guard lastVisibleLineRange != visibleLineRange else { return }
+
+            lastVisibleLineRange = visibleLineRange
+            DispatchQueue.main.async { [weak self] in
+                self?.parent.onVisibleLineRangeChange(visibleLineRange)
+            }
+        }
+
+        @objc private func visibleBoundsDidChange(_ notification: Notification) {
+            guard let observedTextView else { return }
+            publishVisibleLineRange(from: observedTextView)
         }
 
         func textViewDidChangeText(_ notification: Notification) {
@@ -166,6 +262,8 @@ struct CodeEditorView: NSViewRepresentable {
             parent.selectionRanges = textView.editorSelectionRanges.map(TextRange.init)
             textView.needsSyntaxHighlight = true
             parent.applySyntaxHighlighting(to: textView, language: parent.language, fontSize: CGFloat(parent.fontSize))
+            textView.centerSelectionForTypewriterModeIfNeeded()
+            publishVisibleLineRange(from: textView)
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
@@ -175,6 +273,9 @@ struct CodeEditorView: NSViewRepresentable {
             }
 
             parent.selectionRanges = textView.editorSelectionRanges.map(TextRange.init)
+            textView.updateFocusModeDimming()
+            textView.centerSelectionForTypewriterModeIfNeeded()
+            publishVisibleLineRange(from: textView)
         }
     }
 }
@@ -186,6 +287,9 @@ final class EditorTextView: STTextView {
     var highlightedFontSize: CGFloat?
     var configuredWrapsLines: Bool?
     var configuredFontSize: CGFloat?
+    var currentLanguage: EditorLanguage = .plain
+    var focusModeEnabled = false
+    var typewriterModeEnabled = false
 
     private var columnDragState: ColumnDragState?
 
@@ -233,6 +337,30 @@ final class EditorTextView: STTextView {
         }
     }
 
+    func visibleSourceLineRange() -> ClosedRange<Int> {
+        let nsText = editorNSString
+        let ranges = lineRanges
+        guard nsText.length > 0 else { return 1...1 }
+
+        let visibleRect = self.visibleRect
+        guard visibleRect.height > 0 else {
+            let line = (lineInfo(for: editorSelectionRanges.last?.location ?? 0)?.index ?? 0) + 1
+            return line...line
+        }
+
+        let baseLineHeight: CGFloat = ceil(font.ascender - font.descender + font.leading)
+        let lineHeight: CGFloat = Swift.max(1, baseLineHeight)
+        let textTop: CGFloat = Swift.max(0, visibleRect.minY)
+        let startLine = Swift.min(
+            Swift.max(1, Int((textTop / lineHeight).rounded(.down)) + 1),
+            ranges.count
+        )
+        let visibleLineCount = Swift.max(1, Int((visibleRect.height / lineHeight).rounded(.up)) + 1)
+        let endLine = Swift.min(ranges.count, startLine + visibleLineCount - 1)
+
+        return min(startLine, endLine)...max(startLine, endLine)
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard flags.contains(.command),
@@ -242,6 +370,28 @@ final class EditorTextView: STTextView {
 
         let shortcut: EditorShortcut?
         switch event.keyCode {
+        case 18 where flags.contains(.option):
+            shortcut = .showSourceMode
+        case 19 where flags.contains(.option):
+            shortcut = .showMarkdownPreviewMode
+        case 20 where flags.contains(.option):
+            shortcut = .showMarkdownWysiwygMode
+        case 21 where flags.contains(.option):
+            shortcut = .toggleMiniMap
+        case 35 where flags.contains(.shift):
+            shortcut = .showCommandPalette
+        case 31 where flags.contains(.shift):
+            shortcut = .openFolder
+        case 35 where flags.contains(.option):
+            shortcut = .toggleMarkdownPreview
+        case 31 where flags.contains(.option):
+            shortcut = .toggleMarkdownOutline
+        case 14 where flags.contains(.option):
+            shortcut = .toggleWysiwygMode
+        case 3 where flags.contains(.option):
+            shortcut = .toggleFocusMode
+        case 17 where flags.contains(.option) && !flags.contains(.shift):
+            shortcut = .toggleTypewriterMode
         case 34 where flags.contains(.shift):
             shortcut = .toggleAI
         case 3 where flags.contains(.shift):
@@ -250,21 +400,43 @@ final class EditorTextView: STTextView {
             shortcut = .showFind
         case 15:
             shortcut = .showReplace
-        case 2:
+        case 2 where flags.contains(.option):
+            shortcut = .toggleDocumentCatalog
+        case 2 where flags.contains(.shift):
             shortcut = .transform(.duplicateLine)
-        case 37 where flags.contains(.shift):
-            shortcut = .selectAllMatches
-        case 5 where flags.contains(.option):
+        case 2:
             shortcut = .addNextOccurrence
+        case 11:
+            shortcut = .markdown(.bold)
+        case 34:
+            shortcut = .markdown(.italic)
+        case 37 where flags.contains(.shift):
+            shortcut = .editorCommand(.splitSelectionIntoLines)
+        case 37 where flags.contains(.option):
+            shortcut = .selectAllMatches
+        case 37:
+            shortcut = .editorCommand(.expandSelectionToLine)
+        case 5 where flags.contains(.option):
+            shortcut = flags.contains(.shift) ? .addPreviousOccurrence : .addNextOccurrence
+        case 5 where flags.contains(.shift):
+            shortcut = .findPrevious
+        case 5:
+            shortcut = .findNext
         case 6 where flags.contains(.option):
             shortcut = .toggleWrapLines
+        case 30:
+            shortcut = .editorCommand(.indentLines)
+        case 33:
+            shortcut = .editorCommand(.outdentLines)
+        case 44:
+            shortcut = .editorCommand(.toggleComment)
         case 32 where flags.contains(.option) && flags.contains(.shift):
             shortcut = .transform(.uniqueLines)
         case 32 where flags.contains(.shift):
             shortcut = .transform(.uppercase)
         case 32 where flags.contains(.option):
             shortcut = .transform(.lowercase)
-        case 17 where flags.contains(.option):
+        case 17 where flags.contains(.option) && flags.contains(.shift):
             shortcut = .transform(.titlecase)
         case 1 where flags.contains(.option):
             shortcut = .transform(.sortLines)
@@ -289,6 +461,17 @@ final class EditorTextView: STTextView {
 
     override func keyDown(with event: NSEvent) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        if flags.contains(.command), flags.contains(.option), !flags.contains(.control) {
+            switch event.keyCode {
+            case 126:
+                if shortcutHandler?(.editorCommand(.moveLineUp)) == true { return }
+            case 125:
+                if shortcutHandler?(.editorCommand(.moveLineDown)) == true { return }
+            default:
+                break
+            }
+        }
 
         if flags.contains(.option), !flags.contains(.command), !flags.contains(.control), !flags.contains(.shift) {
             switch event.keyCode {
@@ -316,6 +499,10 @@ final class EditorTextView: STTextView {
     }
 
     override func insertText(_ insertString: Any) {
+        if insertSmartText(insertString, replacementRange: .notFound) {
+            return
+        }
+
         if insertTextAcrossSelections(insertString, replacementRange: .notFound) {
             return
         }
@@ -324,6 +511,10 @@ final class EditorTextView: STTextView {
     }
 
     override func insertText(_ string: Any, replacementRange: NSRange) {
+        if insertSmartText(string, replacementRange: replacementRange) {
+            return
+        }
+
         if insertTextAcrossSelections(string, replacementRange: replacementRange) {
             return
         }
@@ -331,7 +522,19 @@ final class EditorTextView: STTextView {
         super.insertText(string, replacementRange: replacementRange)
     }
 
+    override func insertNewline(_ sender: Any?) {
+        if continueMarkdownLineAfterReturn() {
+            return
+        }
+
+        super.insertNewline(sender)
+    }
+
     override func deleteBackward(_ sender: Any?) {
+        if deleteSurroundingPair() {
+            return
+        }
+
         if deleteBackwardAcrossSelections() {
             return
         }
@@ -363,6 +566,24 @@ final class EditorTextView: STTextView {
         switch command {
         case .transform(let transform):
             return performTextTransform(transform)
+        case .markdown(let command):
+            return performMarkdownCommand(command)
+        case .splitSelectionIntoLines:
+            return splitSelectionIntoLines()
+        case .expandSelectionToLine:
+            return expandSelectionToLine()
+        case .deleteLine:
+            return deleteSelectedLinesOrCurrentLine()
+        case .moveLineUp:
+            return moveSelectedLines(direction: -1)
+        case .moveLineDown:
+            return moveSelectedLines(direction: 1)
+        case .indentLines:
+            return indentSelectedLines()
+        case .outdentLines:
+            return outdentSelectedLines()
+        case .toggleComment:
+            return toggleLineComments()
         }
     }
 
@@ -374,6 +595,10 @@ final class EditorTextView: STTextView {
             return replaceTargetText { $0.lowercased() }
         case .titlecase:
             return replaceTargetText { $0.capitalized }
+        case .swapCase:
+            return replaceTargetText { $0.swappingCase() }
+        case .reverseSelection:
+            return replaceTargetText { String($0.reversed()) }
         case .sortLines:
             return replaceTargetLines { text in
                 preserveTrailingNewline(text) { lines in
@@ -444,6 +669,435 @@ final class EditorTextView: STTextView {
             ranges: [NSRange(location: lineRange.location + lineRange.length, length: 0)],
             replacements: [insertion]
         )
+    }
+
+    private func performMarkdownCommand(_ command: MarkdownCommand) -> Bool {
+        switch command {
+        case .bold:
+            return wrapSelections(left: "**", right: "**")
+        case .italic:
+            return wrapSelections(left: "*", right: "*")
+        case .inlineCode:
+            return wrapSelections(left: "`", right: "`")
+        case .strikethrough:
+            return wrapSelections(left: "~~", right: "~~")
+        case .highlight:
+            return wrapSelections(left: "==", right: "==")
+        case .subscriptText:
+            return wrapSelections(left: "~", right: "~")
+        case .superscriptText:
+            return wrapSelections(left: "^", right: "^")
+        case .heading1:
+            return transformTargetLines { lines in
+                lines.map { applyHeading(level: 1, to: $0) }
+            }
+        case .heading2:
+            return transformTargetLines { lines in
+                lines.map { applyHeading(level: 2, to: $0) }
+            }
+        case .heading3:
+            return transformTargetLines { lines in
+                lines.map { applyHeading(level: 3, to: $0) }
+            }
+        case .unorderedList:
+            return transformTargetLines { lines in
+                lines.map { toggleLinePrefix("- ", in: $0, matching: #"^[-*+]\s+"#) }
+            }
+        case .orderedList:
+            return transformTargetLines { lines in
+                lines.enumerated().map { index, line in
+                    toggleLinePrefix("\(index + 1). ", in: line, matching: #"^\d+[.)]\s+"#)
+                }
+            }
+        case .taskList:
+            return transformTargetLines { lines in
+                lines.map { toggleLinePrefix("- [ ] ", in: $0, matching: #"^[-*+]\s+\[[ xX]\]\s+"#) }
+            }
+        case .link:
+            return insertMarkdownLink()
+        case .image:
+            return insertMarkdownSnippet("![image](image.png)", selectOffset: 9, selectLength: 9)
+        case .table:
+            return insertMarkdownSnippet("| Column 1 | Column 2 |\n| --- | --- |\n|  |  |", selectOffset: 2, selectLength: 8)
+        case .quote:
+            return transformTargetLines { lines in
+                lines.map { toggleLinePrefix("> ", in: $0, matching: #"^>\s?"#) }
+            }
+        case .codeFence:
+            return insertCodeFence()
+        case .mathBlock:
+            return insertMarkdownSnippet("$$\nx = y\n$$", selectOffset: 3, selectLength: 5)
+        case .mermaidDiagram:
+            return insertMarkdownSnippet("```mermaid\ngraph TD\n  A-->B\n```", selectOffset: 11, selectLength: 16)
+        }
+    }
+
+    private func insertMarkdownLink() -> Bool {
+        let nsText = editorNSString
+        let ranges = editorSelectionRanges.isEmpty
+            ? [NSRange(location: 0, length: 0)]
+            : editorSelectionRanges.map(normalizedRange)
+
+        let edits = ranges.map { range -> TextEdit in
+            let selectedText = nsText.substring(with: range)
+            let text = selectedText.isEmpty ? "link" : selectedText
+            return TextEdit(range: range, replacement: "[\(text)](https://example.com)")
+        }
+
+        var delta = 0
+        let selections = zip(ranges, edits).map { range, edit in
+            let selectedText = nsText.substring(with: range)
+            let linkTextLength = selectedText.isEmpty ? "link".utf16.count : selectedText.utf16.count
+            let location = edit.range.location + delta + 1
+            delta += edit.replacement.utf16.count - edit.range.length
+            return NSRange(location: location, length: linkTextLength)
+        }
+
+        return apply(edits: edits, newSelections: selections)
+    }
+
+    private func insertMarkdownSnippet(_ snippet: String, selectOffset: Int, selectLength: Int) -> Bool {
+        let nsText = editorNSString
+        let range = normalizedRange(editorSelectionRanges.last ?? NSRange(location: 0, length: 0))
+        let location = min(range.location, nsText.length)
+        let prefix = needsLeadingBlankLine(before: location, in: nsText) ? "\n\n" : ""
+        let suffix = needsTrailingBlankLine(after: location + range.length, in: nsText) ? "\n\n" : ""
+        let insertion = "\(prefix)\(snippet)\(suffix)"
+        return apply(
+            edits: [TextEdit(range: range, replacement: insertion)],
+            newSelections: [NSRange(location: location + prefix.utf16.count + selectOffset, length: selectLength)]
+        )
+    }
+
+    private func needsLeadingBlankLine(before location: Int, in text: NSString) -> Bool {
+        guard location > 0 else { return false }
+        let prefix = text.substring(to: min(location, text.length))
+        return !prefix.hasSuffix("\n\n")
+    }
+
+    private func needsTrailingBlankLine(after location: Int, in text: NSString) -> Bool {
+        guard location < text.length else { return false }
+        let suffix = text.substring(from: max(0, location))
+        return !suffix.hasPrefix("\n\n")
+    }
+
+    private func wrapSelections(left: String, right: String) -> Bool {
+        let targetRanges = editorSelectionRanges
+        guard !targetRanges.isEmpty else { return false }
+
+        let nsText = editorNSString
+        let edits = targetRanges.map { range in
+            let selectedText = nsText.substring(with: normalizedRange(range))
+            return TextEdit(range: range, replacement: "\(left)\(selectedText)\(right)")
+        }
+
+        var delta = 0
+        let newSelections = edits.map { edit in
+            let selection = NSRange(
+                location: edit.range.location + delta + left.utf16.count,
+                length: edit.range.length
+            )
+            delta += edit.replacement.utf16.count - edit.range.length
+            return selection
+        }
+
+        return apply(edits: edits, newSelections: newSelections)
+    }
+
+    private func insertCodeFence() -> Bool {
+        let nsText = editorNSString
+        let selectedRanges = nonEmptySelectedRanges()
+
+        if selectedRanges.isEmpty {
+            let cursor = editorSelectionRanges.last ?? NSRange(location: 0, length: 0)
+            let insertion = "```\n\n```"
+            return apply(
+                edits: [TextEdit(range: NSRange(location: min(cursor.location, nsText.length), length: 0), replacement: insertion)],
+                newSelections: [NSRange(location: min(cursor.location, nsText.length) + 4, length: 0)]
+            )
+        }
+
+        let targetRanges = mergedLineRanges(for: selectedRanges)
+        let edits = targetRanges.map { range -> TextEdit in
+            let text = nsText.substring(with: range)
+            return TextEdit(range: range, replacement: "```\n\(text.hasSuffix("\n") ? text : "\(text)\n")```")
+        }
+
+        var delta = 0
+        let selections = edits.map { edit in
+            let selection = NSRange(location: edit.range.location + delta + 4, length: edit.range.length)
+            delta += edit.replacement.utf16.count - edit.range.length
+            return selection
+        }
+
+        return apply(edits: edits, newSelections: selections)
+    }
+
+    private func transformTargetLines(_ transform: ([String]) -> [String]) -> Bool {
+        let nsText = editorNSString
+        let ranges = nonEmptySelectedRanges()
+        let targetRanges = ranges.isEmpty
+            ? [nsText.lineRange(for: NSRange(location: min((editorSelectionRanges.last ?? NSRange(location: 0, length: 0)).location, nsText.length), length: 0))]
+            : mergedLineRanges(for: ranges)
+        let replacements = targetRanges.map { range in
+            preserveTrailingNewline(nsText.substring(with: range), transform: transform)
+        }
+
+        return replace(ranges: targetRanges, replacements: replacements)
+    }
+
+    private func applyHeading(level: Int, to line: String) -> String {
+        let (indent, body) = splitIndent(line)
+        guard !body.trimmingCharacters(in: .whitespaces).isEmpty else { return line }
+        let cleaned = removePrefix(in: body, matching: #"^#{1,6}\s+"#)
+        return "\(indent)\(String(repeating: "#", count: level)) \(cleaned)"
+    }
+
+    private func toggleLinePrefix(_ prefix: String, in line: String, matching pattern: String) -> String {
+        let (indent, body) = splitIndent(line)
+        guard !body.trimmingCharacters(in: .whitespaces).isEmpty else { return line }
+
+        let cleaned = removePrefix(in: body, matching: pattern)
+        if cleaned != body {
+            return "\(indent)\(cleaned)"
+        }
+
+        return "\(indent)\(prefix)\(body)"
+    }
+
+    private func splitIndent(_ line: String) -> (String, String) {
+        let indent = line.prefix { $0 == " " || $0 == "\t" }
+        return (String(indent), String(line.dropFirst(indent.count)))
+    }
+
+    private func removePrefix(in body: String, matching pattern: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return body }
+
+        let nsBody = body as NSString
+        let fullRange = NSRange(location: 0, length: nsBody.length)
+        guard let match = regex.firstMatch(in: body, range: fullRange),
+              match.range.location == 0 else {
+            return body
+        }
+
+        return nsBody.substring(from: match.range.length)
+    }
+
+    private func splitSelectionIntoLines() -> Bool {
+        let ranges = nonEmptySelectedRanges()
+        guard !ranges.isEmpty else { return expandSelectionToLine() }
+
+        let nsText = editorNSString
+        let splitRanges = ranges.flatMap { range in
+            lineContentRanges(intersecting: range, in: nsText)
+        }
+
+        guard !splitRanges.isEmpty else { return false }
+        setEditorSelectionRanges(splitRanges, scrollToLast: true)
+        return true
+    }
+
+    private func expandSelectionToLine() -> Bool {
+        let nsText = editorNSString
+        let ranges = editorSelectionRanges.isEmpty ? [NSRange(location: 0, length: 0)] : editorSelectionRanges
+        let lineRanges = normalizedRanges(ranges.map { range in
+            nsText.lineRange(for: NSRange(location: min(range.location, nsText.length), length: max(range.length, 0)))
+        })
+
+        setEditorSelectionRanges(lineRanges, scrollToLast: true)
+        return true
+    }
+
+    private func deleteSelectedLinesOrCurrentLine() -> Bool {
+        let nsText = editorNSString
+        let ranges = nonEmptySelectedRanges()
+        let targetRanges = ranges.isEmpty
+            ? [nsText.lineRange(for: NSRange(location: min((editorSelectionRanges.last ?? NSRange(location: 0, length: 0)).location, nsText.length), length: 0))]
+            : mergedLineRanges(for: ranges)
+        guard !targetRanges.isEmpty else { return false }
+
+        let selectionLocation = targetRanges.first?.location ?? 0
+        let edits = targetRanges.map { TextEdit(range: $0, replacement: "") }
+        return apply(edits: edits, newSelections: [NSRange(location: selectionLocation, length: 0)])
+    }
+
+    private func moveSelectedLines(direction: Int) -> Bool {
+        let nsText = editorNSString
+        guard nsText.length > 0 else { return false }
+
+        let ranges = nonEmptySelectedRanges()
+        let cursor = editorSelectionRanges.last ?? NSRange(location: 0, length: 0)
+        let targetRange = ranges.isEmpty
+            ? nsText.lineRange(for: NSRange(location: min(cursor.location, nsText.length), length: 0))
+            : mergedLineRanges(for: ranges).reduce(nil) { result, range -> NSRange? in
+                guard let result else { return range }
+                let end = max(result.location + result.length, range.location + range.length)
+                return NSRange(location: min(result.location, range.location), length: end - min(result.location, range.location))
+            } ?? NSRange(location: 0, length: 0)
+
+        if direction < 0 {
+            guard targetRange.location > 0 else { return false }
+            let previousLine = nsText.lineRange(for: NSRange(location: max(0, targetRange.location - 1), length: 0))
+            let targetText = nsText.substring(with: targetRange)
+            let previousText = nsText.substring(with: previousLine)
+            let replacementRange = NSRange(location: previousLine.location, length: previousLine.length + targetRange.length)
+            return apply(
+                edits: [TextEdit(range: replacementRange, replacement: swapAdjacentLineTexts(previousText, targetText))],
+                newSelections: [NSRange(location: previousLine.location, length: targetRange.length)]
+            )
+        }
+
+        let targetEnd = targetRange.location + targetRange.length
+        guard targetEnd < nsText.length else { return false }
+
+        let nextLine = nsText.lineRange(for: NSRange(location: targetEnd, length: 0))
+        let targetText = nsText.substring(with: targetRange)
+        let nextText = nsText.substring(with: nextLine)
+        let replacementRange = NSRange(location: targetRange.location, length: targetRange.length + nextLine.length)
+        return apply(
+            edits: [TextEdit(range: replacementRange, replacement: swapAdjacentLineTexts(targetText, nextText))],
+            newSelections: [
+                NSRange(
+                    location: targetRange.location + firstLineOffsetAfterSwap(first: targetText, second: nextText),
+                    length: firstLineLengthAfterSwap(first: targetText, second: nextText)
+                )
+            ]
+        )
+    }
+
+    private func swapAdjacentLineTexts(_ first: String, _ second: String) -> String {
+        if trailingLineBreak(in: second) != nil {
+            return "\(second)\(first)"
+        }
+
+        if let firstBreak = trailingLineBreak(in: first) {
+            return "\(second)\(firstBreak)\(removingTrailingLineBreak(from: first))"
+        }
+
+        return "\(second)\n\(first)"
+    }
+
+    private func firstLineOffsetAfterSwap(first: String, second: String) -> Int {
+        if trailingLineBreak(in: second) != nil {
+            return second.utf16.count
+        }
+
+        if let firstBreak = trailingLineBreak(in: first) {
+            return second.utf16.count + firstBreak.utf16.count
+        }
+
+        return second.utf16.count + 1
+    }
+
+    private func firstLineLengthAfterSwap(first: String, second: String) -> Int {
+        if trailingLineBreak(in: second) != nil {
+            return first.utf16.count
+        }
+
+        if trailingLineBreak(in: first) != nil {
+            return removingTrailingLineBreak(from: first).utf16.count
+        }
+
+        return first.utf16.count
+    }
+
+    private func trailingLineBreak(in text: String) -> String? {
+        if text.hasSuffix("\r\n") { return "\r\n" }
+        if text.hasSuffix("\n") { return "\n" }
+        if text.hasSuffix("\r") { return "\r" }
+        return nil
+    }
+
+    private func removingTrailingLineBreak(from text: String) -> String {
+        if text.hasSuffix("\r\n") { return String(text.dropLast(2)) }
+        if text.hasSuffix("\n") || text.hasSuffix("\r") { return String(text.dropLast()) }
+        return text
+    }
+
+    private func indentSelectedLines() -> Bool {
+        transformTargetLines { lines in
+            lines.map { line in
+                line.isEmpty ? line : "\t\(line)"
+            }
+        }
+    }
+
+    private func outdentSelectedLines() -> Bool {
+        transformTargetLines { lines in
+            lines.map { line in
+                if line.hasPrefix("\t") {
+                    return String(line.dropFirst())
+                }
+                if line.hasPrefix("    ") {
+                    return String(line.dropFirst(4))
+                }
+                if line.hasPrefix("  ") {
+                    return String(line.dropFirst(2))
+                }
+                if line.hasPrefix(" ") {
+                    return String(line.dropFirst())
+                }
+                return line
+            }
+        }
+    }
+
+    private func toggleLineComments() -> Bool {
+        guard let prefix = lineCommentPrefix else { return false }
+
+        return transformTargetLines { lines in
+            let meaningfulLines = lines.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            let shouldUncomment = !meaningfulLines.isEmpty && meaningfulLines.allSatisfy { line in
+                let (_, body) = splitIndent(line)
+                return body.hasPrefix(prefix)
+            }
+
+            return lines.map { line in
+                let (indent, body) = splitIndent(line)
+                guard !body.trimmingCharacters(in: .whitespaces).isEmpty else { return line }
+
+                if shouldUncomment, body.hasPrefix(prefix) {
+                    var uncommented = String(body.dropFirst(prefix.count))
+                    if uncommented.hasPrefix(" ") {
+                        uncommented.removeFirst()
+                    }
+                    return "\(indent)\(uncommented)"
+                }
+
+                return "\(indent)\(prefix) \(body)"
+            }
+        }
+    }
+
+    private var lineCommentPrefix: String? {
+        switch currentLanguage {
+        case .swift, .javascript, .typescript, .go, .rust:
+            return "//"
+        case .python, .ruby, .shell:
+            return "#"
+        case .plain, .markdown, .json, .html, .css:
+            return nil
+        }
+    }
+
+    private func lineContentRanges(intersecting range: NSRange, in nsText: NSString) -> [NSRange] {
+        var output: [NSRange] = []
+        var location = range.location
+        let end = range.location + range.length
+
+        while location < end {
+            let lineRange = nsText.lineRange(for: NSRange(location: min(location, nsText.length), length: 0))
+            let contentRange = contentRange(for: lineRange)
+            let start = max(contentRange.location, range.location)
+            let finish = min(contentRange.location + contentRange.length, end)
+            output.append(NSRange(location: start, length: max(0, finish - start)))
+
+            let nextLocation = lineRange.location + max(lineRange.length, 1)
+            guard nextLocation > location else { break }
+            location = nextLocation
+        }
+
+        return output
     }
 
     private func replace(ranges: [NSRange], replacements: [String]) -> Bool {
@@ -518,11 +1172,184 @@ final class EditorTextView: STTextView {
         }
     }
 
+    private func insertSmartText(_ insertString: Any, replacementRange: NSRange) -> Bool {
+        guard let replacement = plainText(from: insertString),
+              replacement.utf16.count == 1 else {
+            return false
+        }
+
+        if skipOverClosingPair(replacement, replacementRange: replacementRange) {
+            return true
+        }
+
+        guard let pair = smartPair(for: replacement) else {
+            return false
+        }
+
+        return insertSmartPair(pair, replacementRange: replacementRange)
+    }
+
+    private func smartPair(for replacement: String) -> (left: String, right: String)? {
+        switch replacement {
+        case "(": return ("(", ")")
+        case "[": return ("[", "]")
+        case "{": return ("{", "}")
+        case "\"": return ("\"", "\"")
+        case "'": return ("'", "'")
+        case "`" where currentLanguage == .markdown: return ("`", "`")
+        case "*" where currentLanguage == .markdown && nonEmptySelectedRanges().count > 0,
+             "_" where currentLanguage == .markdown && nonEmptySelectedRanges().count > 0:
+            return (replacement, replacement)
+        default:
+            return nil
+        }
+    }
+
+    private func insertSmartPair(_ pair: (left: String, right: String), replacementRange: NSRange) -> Bool {
+        let targetRanges = rangesForEditing(replacementRange: replacementRange)
+        guard !targetRanges.isEmpty else { return false }
+
+        let nsText = editorNSString
+        let edits = targetRanges.map { range in
+            let selectedText = nsText.substring(with: normalizedRange(range))
+            return TextEdit(range: range, replacement: "\(pair.left)\(selectedText)\(pair.right)")
+        }
+
+        var delta = 0
+        let newSelections = edits.map { edit in
+            let location = edit.range.location + delta + pair.left.utf16.count
+            let selection = NSRange(location: location, length: edit.range.length)
+            delta += edit.replacement.utf16.count - edit.range.length
+            return selection
+        }
+
+        return apply(edits: edits, newSelections: newSelections)
+    }
+
+    private func skipOverClosingPair(_ replacement: String, replacementRange: NSRange) -> Bool {
+        guard replacementRange.location == NSNotFound,
+              ")]}\"'`".contains(replacement),
+              editorSelectionRanges.count == 1,
+              let cursor = editorSelectionRanges.first,
+              cursor.length == 0 else {
+            return false
+        }
+
+        let nsText = editorNSString
+        guard cursor.location < nsText.length,
+              nsText.substring(with: NSRange(location: cursor.location, length: 1)) == replacement else {
+            return false
+        }
+
+        setEditorSelectionRanges([NSRange(location: cursor.location + 1, length: 0)], scrollToLast: true)
+        return true
+    }
+
+    private func deleteSurroundingPair() -> Bool {
+        guard editorSelectionRanges.count == 1,
+              let cursor = editorSelectionRanges.first,
+              cursor.length == 0,
+              cursor.location > 0 else {
+            return false
+        }
+
+        let nsText = editorNSString
+        guard cursor.location < nsText.length else { return false }
+
+        let left = nsText.substring(with: NSRange(location: cursor.location - 1, length: 1))
+        let right = nsText.substring(with: NSRange(location: cursor.location, length: 1))
+        guard smartPair(for: left)?.right == right ||
+            ["(": ")", "[": "]", "{": "}", "\"": "\"", "'": "'", "`": "`"][left] == right else {
+            return false
+        }
+
+        return apply(
+            edits: [TextEdit(range: NSRange(location: cursor.location - 1, length: 2), replacement: "")],
+            newSelections: [NSRange(location: cursor.location - 1, length: 0)]
+        )
+    }
+
+    private func continueMarkdownLineAfterReturn() -> Bool {
+        guard currentLanguage == .markdown,
+              editorSelectionRanges.count == 1,
+              let cursor = editorSelectionRanges.first,
+              cursor.length == 0 else {
+            return false
+        }
+
+        let nsText = editorNSString
+        let safeLocation = min(max(0, cursor.location), nsText.length)
+        let lineRange = nsText.lineRange(for: NSRange(location: safeLocation, length: 0))
+        let contentRange = contentRange(for: lineRange)
+        let line = nsText.substring(with: contentRange)
+
+        guard let continuation = markdownContinuation(for: line) else {
+            return false
+        }
+
+        let trailingText = (line as NSString).substring(from: min(continuation.markerLength, (line as NSString).length))
+        if trailingText.trimmingCharacters(in: .whitespaces).isEmpty {
+            let edit = TextEdit(
+                range: NSRange(location: lineRange.location, length: continuation.markerLength),
+                replacement: ""
+            )
+            return apply(edits: [edit], newSelections: [NSRange(location: lineRange.location, length: 0)])
+        }
+
+        let insertion = "\n\(continuation.nextPrefix)"
+        let edit = TextEdit(range: NSRange(location: safeLocation, length: 0), replacement: insertion)
+        return apply(
+            edits: [edit],
+            newSelections: [NSRange(location: safeLocation + insertion.utf16.count, length: 0)]
+        )
+    }
+
+    private func markdownContinuation(for line: String) -> (markerLength: Int, nextPrefix: String)? {
+        let patterns: [(String, (NSTextCheckingResult, NSString) -> String)] = [
+            ("^(\\s*)[-*+]\\s+\\[[ xX]\\]\\s+", { match, nsLine in
+                "\(nsLine.substring(with: match.range(at: 1)))- [ ] "
+            }),
+            ("^(\\s*)(\\d+)([.)])\\s+", { match, nsLine in
+                let indent = nsLine.substring(with: match.range(at: 1))
+                let number = Int(nsLine.substring(with: match.range(at: 2))) ?? 1
+                let delimiter = nsLine.substring(with: match.range(at: 3))
+                return "\(indent)\(number + 1)\(delimiter) "
+            }),
+            ("^(\\s*)[-*+]\\s+", { match, nsLine in
+                "\(nsLine.substring(with: match.range(at: 1)))- "
+            }),
+            ("^(\\s*)>\\s?", { match, nsLine in
+                "\(nsLine.substring(with: match.range(at: 1)))> "
+            })
+        ]
+
+        let nsLine = line as NSString
+        let fullRange = NSRange(location: 0, length: nsLine.length)
+
+        for (pattern, nextPrefix) in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: line, range: fullRange),
+                  match.range.location == 0 else {
+                continue
+            }
+
+            return (match.range.length, nextPrefix(match, nsLine))
+        }
+
+        return nil
+    }
+
     private func apply(edits: [TextEdit], selectionMode: MultiEditSelectionMode) -> Bool {
         let preparedEdits = nonOverlappingEdits(edits)
         guard !preparedEdits.isEmpty else { return false }
 
         let newSelections = selectionsAfterApplying(edits: preparedEdits, selectionMode: selectionMode)
+        return apply(edits: preparedEdits, newSelections: newSelections)
+    }
+
+    private func apply(edits: [TextEdit], newSelections: [NSRange]) -> Bool {
+        let preparedEdits = nonOverlappingEdits(edits)
+        guard !preparedEdits.isEmpty else { return false }
 
         undoManager?.beginUndoGrouping()
         defer { undoManager?.endUndoGrouping() }
@@ -531,7 +1358,7 @@ final class EditorTextView: STTextView {
             replaceCharacters(in: edit.range, with: edit.replacement)
         }
 
-        setEditorSelectionRanges(newSelections, scrollToLast: true)
+        setEditorSelectionRanges(normalizedRanges(newSelections), scrollToLast: true)
         return true
     }
 
@@ -724,6 +1551,10 @@ final class EditorTextView: STTextView {
         return length
     }
 
+    private func contentRange(for lineRange: NSRange) -> NSRange {
+        NSRange(location: lineRange.location, length: contentLength(for: lineRange))
+    }
+
     func normalizedRanges(_ ranges: [NSRange]) -> [NSRange] {
         var seen = Set<String>()
         return ranges
@@ -807,6 +1638,111 @@ final class EditorTextView: STTextView {
         let output = transform(lines).joined(separator: "\n")
         return hasTrailingNewline ? "\(output)\n" : output
     }
+
+    func updateFocusModeDimming() {
+        let nsText = editorNSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        guard fullRange.length > 0 else { return }
+
+        removeRenderingAttribute(.foregroundColor, range: fullRange)
+        guard focusModeEnabled else {
+            needsDisplay = true
+            return
+        }
+
+        addRenderingAttributes(
+            [.foregroundColor: NSColor.labelColor.withAlphaComponent(0.24)],
+            range: fullRange
+        )
+
+        let activeRange = focusedBlockRange()
+        addRenderingAttributes([.foregroundColor: NSColor.labelColor], range: activeRange)
+        needsDisplay = true
+    }
+
+    func centerSelectionForTypewriterModeIfNeeded(immediate: Bool = false) {
+        guard typewriterModeEnabled else { return }
+
+        let center = { [weak self] in
+            guard let self, self.typewriterModeEnabled else { return }
+            self.centerActiveLineForTypewriterMode()
+        }
+
+        if immediate {
+            center()
+        } else {
+            DispatchQueue.main.async(execute: center)
+        }
+    }
+
+    private func centerActiveLineForTypewriterMode() {
+        guard let scrollView = enclosingScrollView,
+              let window,
+              let selection = editorSelectionRanges.last else {
+            centerSelectionInVisibleArea(nil)
+            return
+        }
+
+        let nsText = editorNSString
+        let caretLocation = min(selection.location + selection.length, nsText.length)
+        let caretRange = NSRange(location: caretLocation, length: 0)
+        let screenRect = firstRect(forCharacterRange: caretRange, actualRange: nil)
+
+        guard !screenRect.isEmpty, !screenRect.isNull, !screenRect.isInfinite else {
+            scrollRangeToVisible(caretRange)
+            centerSelectionInVisibleArea(nil)
+            return
+        }
+
+        let windowOrigin = window.convertPoint(fromScreen: screenRect.origin)
+        let localOrigin = convert(windowOrigin, from: nil)
+        let localRect = NSRect(origin: localOrigin, size: screenRect.size)
+        let clipView = scrollView.contentView
+        let visibleRect = clipView.documentVisibleRect
+        guard visibleRect.height > 0 else { return }
+
+        let targetY = localRect.midY - visibleRect.height * 0.5
+        let maxY = max(0, bounds.height - visibleRect.height)
+        let clampedY = min(max(0, targetY), maxY)
+        clipView.setBoundsOrigin(NSPoint(x: visibleRect.origin.x, y: clampedY))
+        scrollView.reflectScrolledClipView(clipView)
+    }
+
+    private func focusedBlockRange() -> NSRange {
+        let nsText = editorNSString
+        guard nsText.length > 0 else { return NSRange(location: 0, length: 0) }
+
+        let cursor = editorSelectionRanges.last ?? NSRange(location: 0, length: 0)
+        let safeLocation = min(max(0, cursor.location), nsText.length)
+        guard let currentLine = lineInfo(for: safeLocation) else {
+            return NSRange(location: safeLocation, length: 0)
+        }
+
+        let ranges = lineRanges
+        var startIndex = currentLine.index
+        var endIndex = currentLine.index
+
+        if isBlankLine(ranges[currentLine.index]) {
+            return ranges[currentLine.index]
+        }
+
+        while startIndex > 0, !isBlankLine(ranges[startIndex - 1]) {
+            startIndex -= 1
+        }
+
+        while endIndex + 1 < ranges.count, !isBlankLine(ranges[endIndex + 1]) {
+            endIndex += 1
+        }
+
+        let start = ranges[startIndex].location
+        let endRange = ranges[endIndex]
+        return NSRange(location: start, length: endRange.location + endRange.length - start)
+    }
+
+    private func isBlankLine(_ range: NSRange) -> Bool {
+        let text = editorNSString.substring(with: contentRange(for: range))
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 }
 
 private struct ColumnDragState {
@@ -844,5 +1780,24 @@ private extension String {
             result.removeLast()
         }
         return result
+    }
+
+    func swappingCase() -> String {
+        map { character in
+            let value = String(character)
+            let uppercased = value.uppercased()
+            let lowercased = value.lowercased()
+
+            if value == uppercased, value != lowercased {
+                return lowercased
+            }
+
+            if value == lowercased, value != uppercased {
+                return uppercased
+            }
+
+            return value
+        }
+        .joined()
     }
 }

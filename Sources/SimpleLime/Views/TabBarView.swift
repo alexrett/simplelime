@@ -56,7 +56,7 @@ final class TabBarControl: NSView, NSDraggingSource {
         buffers = store.buffers
         selectedBufferID = store.selectedBufferID
         windowGroupID = store.windowGroupID
-        leadingInset = isFullScreen ? 0 : 80
+        leadingInset = resolvedLeadingInset(isFullScreen: isFullScreen)
         clampScrollOffset()
         needsDisplay = true
     }
@@ -92,7 +92,12 @@ final class TabBarControl: NSView, NSDraggingSource {
             mouseDownState = MouseDownState(hit: .close(id), startPoint: point, event: event)
         case .tab(let id):
             store?.select(id)
-            mouseDownState = MouseDownState(hit: .tab(id), startPoint: point, event: event)
+            if event.clickCount >= 2 {
+                mouseDownState = MouseDownState(hit: .tab(id), startPoint: point, event: event)
+            } else {
+                mouseDownState = nil
+                window?.performDrag(with: event)
+            }
         }
     }
 
@@ -442,6 +447,24 @@ final class TabBarControl: NSView, NSDraggingSource {
 
     private func dragDistance(from start: NSPoint, to end: NSPoint) -> CGFloat {
         hypot(end.x - start.x, end.y - start.y)
+    }
+
+    private func resolvedLeadingInset(isFullScreen: Bool) -> CGFloat {
+        guard !isFullScreen else { return 0 }
+        guard let window,
+              let zoomButton = window.standardWindowButton(.zoomButton),
+              let buttonContainer = zoomButton.superview else {
+            return 96
+        }
+
+        let buttonFrameInWindow = buttonContainer.convert(zoomButton.frame, to: nil)
+        let buttonFrame = convert(buttonFrameInWindow, from: nil)
+
+        guard buttonFrame.width > 0, buttonFrame.maxX > 0 else {
+            return 96
+        }
+
+        return max(96, ceil(buttonFrame.maxX + 16))
     }
 }
 

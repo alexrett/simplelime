@@ -14,14 +14,19 @@ SimpleLime is not trying to replace a full IDE. It is a fast working notebook wi
 
 - Restored scratch buffers that survive app restarts
 - Open and save regular text files
+- Open a folder as a document catalog sidebar
 - Chrome-style tabs in the window title area
 - Always-on line numbers and current-line highlight
 - Soft wrap by default
 - Basic syntax highlighting for Markdown, Swift, JavaScript, TypeScript, JSON, HTML, CSS, Python, Ruby, Go, Rust, and shell
-- Markdown preview
-- Find, replace, regex search, find in all tabs, select all matches
+- Markdown WYSIWYG editing plus source preview with table controls, paste/drop image insertion, local/remote images, reference links/images, autolinks, safe inline HTML/media blocks, offline Mermaid and math fallbacks, math blocks, TOC, callouts, front matter, footnotes, outline navigation, heading filter, Markdown formatting commands, list continuation, and smart bracket/quote pairs
+- Find, replace, regex search, find/replace in tabs and opened folders, select all matches
 - Multi-cursor editing
-- Text transforms: uppercase, lowercase, title case, duplicate line or selection, sort lines, unique lines, trim trailing whitespace, join lines
+- Sublime-style selection and line commands: add next occurrence, split selection into lines, expand selection to line, column cursors, move/delete/indent/comment lines
+- Sublime-style minimap with click-to-line navigation
+- Focus mode and typewriter mode for long writing sessions
+- Command palette with command search, fuzzy file navigation for the opened folder, and `:line` navigation
+- Text transforms: uppercase, lowercase, title case, swap case, reverse selection, duplicate line or selection, sort lines, unique lines, trim trailing whitespace, join lines
 - Font size controls
 - AI chat per tab with multiple sessions
 - ACP integration for Copilot and configurable Codex-compatible agents
@@ -39,19 +44,43 @@ SimpleLime is not trying to replace a full IDE. It is a fast working notebook wi
 | `⌘⇧N` | New window |
 | `⌘⌥N` | Move current tab to new window |
 | `⌘O` | Open file |
+| `⌘⇧O` | Open folder |
 | `⌘S` | Save |
 | `⌘W` | Close tab |
 | `⌘F` | Find |
 | `⌘R` | Find and replace |
-| `⌘⇧F` | Find in all tabs |
-| `⌘⇧L` | Select all matches |
-| `⌘D` | Duplicate line or selection |
+| `⌘⇧F` | Find in files |
+| `⌘⇧R` | Replace in files |
+| `⌘⇧P` | Command palette: commands, folder files, and `:line` |
+| `⌘D` | Add next occurrence |
+| `⌘⌥G` / `⌘⌥⇧G` | Add next / previous occurrence |
+| `⌘⌥L` | Select all matches |
+| `⌘L` | Expand selection to line |
+| `⌘⇧L` | Split selection into lines |
+| `⌘⇧D` | Duplicate line or selection |
+| `⌘J` | Join lines |
+| `⌘]` / `⌘[` | Indent / outdent lines |
+| `⌘/` | Toggle line comment |
+| `⌘⌥↑` / `⌘⌥↓` | Move line up / down |
 | `⌃Tab` | Next tab |
 | `⌃⇧Tab` | Previous tab |
 | `⌘+` / `⌘-` | Increase / decrease font size |
-| `⌘⇧P` | Toggle Markdown preview |
+| `⌘⌥1` | Markdown source mode |
+| `⌘⌥2` | Markdown source + preview split |
+| `⌘⌥3` | Markdown WYSIWYG mode |
+| `⌘⌥P` | Toggle Markdown preview |
+| `⌘⌥O` | Toggle Markdown outline |
+| `⌘⌥E` | Toggle Markdown WYSIWYG mode |
+| `⌘⌥D` | Toggle documents sidebar |
+| `⌘⌥4` | Toggle minimap |
+| `⌘⌥F` | Toggle focus mode |
+| `⌘⌥T` | Toggle typewriter mode |
 | `⌘⇧I` | Toggle AI panel |
 | `⌘⇧K` | Show network devices |
+
+## Markdown Visual QA
+
+Open `docs/markdown-visual-fixture.md` in SimpleLime to visually check the Markdown surface in one document. It includes local images, image paths with spaces, raw HTML images/media, reference links/images, tables, Mermaid diagrams, math, front matter, TOC, footnotes, callouts, and inline Typora-style extensions.
 
 ## AI
 

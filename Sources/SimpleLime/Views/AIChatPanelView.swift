@@ -135,7 +135,7 @@ struct AIChatPanelView: View {
                     }
                     .padding(.vertical, 14)
                 }
-                .onChange(of: session.messages.last?.id) { id in
+                .onChange(of: session.messages.last?.id) { _, id in
                     if let id {
                         proxy.scrollTo(id, anchor: .bottom)
                     }

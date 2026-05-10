@@ -30,6 +30,11 @@ struct SimpleLimeCommands: Commands {
             }
             .keyboardShortcut("o", modifiers: [.command])
 
+            Button("Open Folder...") {
+                store?.openFolder()
+            }
+            .keyboardShortcut("o", modifiers: [.command, .shift])
+
             Divider()
 
             Button("Move Tab to New Window") {
@@ -79,15 +84,20 @@ struct SimpleLimeCommands: Commands {
             }
             .keyboardShortcut("r", modifiers: [.command])
 
-            Button("Find in All Tabs") {
+            Button("Find in Files") {
                 store?.showGlobalFind()
             }
             .keyboardShortcut("f", modifiers: [.command, .shift])
 
+            Button("Replace in Files") {
+                store?.showGlobalFind()
+            }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+
             Button("Select All Matches") {
                 store?.selectAllMatches()
             }
-            .keyboardShortcut("l", modifiers: [.command, .shift])
+            .keyboardShortcut("l", modifiers: [.command, .option])
 
             Divider()
 
@@ -106,17 +116,53 @@ struct SimpleLimeCommands: Commands {
             }
             .keyboardShortcut("g", modifiers: [.command, .option])
 
+            Button("Add Previous Occurrence") {
+                store?.addPreviousOccurrence()
+            }
+            .keyboardShortcut("g", modifiers: [.command, .option, .shift])
+
             Button("Single Cursor") {
                 store?.escape()
             }
             .keyboardShortcut(.escape, modifiers: [])
         }
 
+        CommandMenu("Navigate") {
+            Button("Command Palette") {
+                store?.showCommandPalette()
+            }
+            .keyboardShortcut("p", modifiers: [.command, .shift])
+
+            Divider()
+
+            Button(store?.isDocumentCatalogVisible == true ? "Hide Documents Sidebar" : "Show Documents Sidebar") {
+                store?.toggleDocumentCatalog()
+            }
+            .keyboardShortcut("d", modifiers: [.command, .option])
+
+            Divider()
+
+            Button("Split Selection Into Lines") {
+                store?.performEditorCommand(.splitSelectionIntoLines)
+            }
+            .keyboardShortcut("l", modifiers: [.command, .shift])
+
+            Button("Expand Selection to Line") {
+                store?.performEditorCommand(.expandSelectionToLine)
+            }
+            .keyboardShortcut("l", modifiers: [.command])
+        }
+
         CommandMenu("Text") {
+            Button("Add Next Occurrence") {
+                store?.addNextOccurrence()
+            }
+            .keyboardShortcut("d", modifiers: [.command])
+
             Button("Duplicate Line") {
                 store?.performTextTransform(.duplicateLine)
             }
-            .keyboardShortcut("d", modifiers: [.command])
+            .keyboardShortcut("d", modifiers: [.command, .shift])
 
             Divider()
 
@@ -133,7 +179,15 @@ struct SimpleLimeCommands: Commands {
             Button(TextTransform.titlecase.title) {
                 store?.performTextTransform(.titlecase)
             }
-            .keyboardShortcut("t", modifiers: [.command, .option])
+            .keyboardShortcut("t", modifiers: [.command, .option, .shift])
+
+            Button(TextTransform.swapCase.title) {
+                store?.performTextTransform(.swapCase)
+            }
+
+            Button(TextTransform.reverseSelection.title) {
+                store?.performTextTransform(.reverseSelection)
+            }
 
             Divider()
 
@@ -156,6 +210,149 @@ struct SimpleLimeCommands: Commands {
                 store?.performTextTransform(.joinLines)
             }
             .keyboardShortcut("j", modifiers: [.command])
+
+            Divider()
+
+            Button("Delete Line") {
+                store?.performEditorCommand(.deleteLine)
+            }
+
+            Button("Move Line Up") {
+                store?.performEditorCommand(.moveLineUp)
+            }
+            .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+
+            Button("Move Line Down") {
+                store?.performEditorCommand(.moveLineDown)
+            }
+            .keyboardShortcut(.downArrow, modifiers: [.command, .option])
+
+            Button("Indent Lines") {
+                store?.performEditorCommand(.indentLines)
+            }
+            .keyboardShortcut("]", modifiers: [.command])
+
+            Button("Outdent Lines") {
+                store?.performEditorCommand(.outdentLines)
+            }
+            .keyboardShortcut("[", modifiers: [.command])
+
+            Button("Toggle Comment") {
+                store?.performEditorCommand(.toggleComment)
+            }
+            .keyboardShortcut("/", modifiers: [.command])
+        }
+
+        CommandMenu("Markdown") {
+            Button("Source Mode") {
+                store?.showSourceMode()
+            }
+            .keyboardShortcut("1", modifiers: [.command, .option])
+
+            Button("Preview Split Mode") {
+                store?.showMarkdownPreviewMode()
+            }
+            .keyboardShortcut("2", modifiers: [.command, .option])
+
+            Button("WYSIWYG Mode") {
+                store?.showMarkdownWysiwygMode()
+            }
+            .keyboardShortcut("3", modifiers: [.command, .option])
+
+            Divider()
+
+            Button(store?.isWysiwygModeEnabled == true ? "Disable WYSIWYG Mode" : "Enable WYSIWYG Mode") {
+                store?.toggleWysiwygMode()
+            }
+            .keyboardShortcut("e", modifiers: [.command, .option])
+
+            Divider()
+
+            Button("Bold") {
+                store?.performMarkdownCommand(.bold)
+            }
+            .keyboardShortcut("b", modifiers: [.command])
+
+            Button("Italic") {
+                store?.performMarkdownCommand(.italic)
+            }
+            .keyboardShortcut("i", modifiers: [.command])
+
+            Button("Inline Code") {
+                store?.performMarkdownCommand(.inlineCode)
+            }
+
+            Button("Strikethrough") {
+                store?.performMarkdownCommand(.strikethrough)
+            }
+
+            Button("Highlight") {
+                store?.performMarkdownCommand(.highlight)
+            }
+
+            Button("Subscript") {
+                store?.performMarkdownCommand(.subscriptText)
+            }
+
+            Button("Superscript") {
+                store?.performMarkdownCommand(.superscriptText)
+            }
+
+            Divider()
+
+            Button("Heading 1") {
+                store?.performMarkdownCommand(.heading1)
+            }
+
+            Button("Heading 2") {
+                store?.performMarkdownCommand(.heading2)
+            }
+
+            Button("Heading 3") {
+                store?.performMarkdownCommand(.heading3)
+            }
+
+            Divider()
+
+            Button("Bullet List") {
+                store?.performMarkdownCommand(.unorderedList)
+            }
+
+            Button("Numbered List") {
+                store?.performMarkdownCommand(.orderedList)
+            }
+
+            Button("Task List") {
+                store?.performMarkdownCommand(.taskList)
+            }
+
+            Button("Link") {
+                store?.performMarkdownCommand(.link)
+            }
+
+            Button("Image") {
+                store?.performMarkdownCommand(.image)
+            }
+
+            Button("Table") {
+                store?.performMarkdownCommand(.table)
+            }
+
+            Button("Quote") {
+                store?.performMarkdownCommand(.quote)
+            }
+
+            Button("Code Fence") {
+                store?.performMarkdownCommand(.codeFence)
+            }
+
+            Button("Math Block") {
+                store?.performMarkdownCommand(.mathBlock)
+            }
+
+            Button("Mermaid Diagram") {
+                store?.performMarkdownCommand(.mermaidDiagram)
+            }
         }
 
         CommandMenu("AI") {
@@ -189,9 +386,34 @@ struct SimpleLimeCommands: Commands {
             Divider()
 
             Button(store?.isPreviewVisible == true ? "Hide Markdown Preview" : "Show Markdown Preview") {
-                store?.isPreviewVisible.toggle()
+                store?.toggleMarkdownPreview()
             }
-            .keyboardShortcut("p", modifiers: [.command, .shift])
+            .keyboardShortcut("p", modifiers: [.command, .option])
+
+            Button(store?.isOutlineVisible == true ? "Hide Markdown Outline" : "Show Markdown Outline") {
+                store?.toggleMarkdownOutline()
+            }
+            .keyboardShortcut("o", modifiers: [.command, .option])
+
+            Button(store?.isWysiwygModeEnabled == true ? "Disable WYSIWYG Mode" : "Enable WYSIWYG Mode") {
+                store?.toggleWysiwygMode()
+            }
+            .keyboardShortcut("e", modifiers: [.command, .option])
+
+            Button(store?.isMiniMapVisible == true ? "Hide Minimap" : "Show Minimap") {
+                store?.toggleMiniMap()
+            }
+            .keyboardShortcut("4", modifiers: [.command, .option])
+
+            Button(store?.isFocusModeEnabled == true ? "Disable Focus Mode" : "Enable Focus Mode") {
+                store?.toggleFocusMode()
+            }
+            .keyboardShortcut("f", modifiers: [.command, .option])
+
+            Button(store?.isTypewriterModeEnabled == true ? "Disable Typewriter Mode" : "Enable Typewriter Mode") {
+                store?.toggleTypewriterMode()
+            }
+            .keyboardShortcut("t", modifiers: [.command, .option])
 
             Button(store?.wrapsLines == true ? "Disable Word Wrap" : "Enable Word Wrap") {
                 store?.toggleWrapLines()

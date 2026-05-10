@@ -4,6 +4,8 @@ enum TextTransform: String, CaseIterable, Identifiable {
     case uppercase
     case lowercase
     case titlecase
+    case swapCase
+    case reverseSelection
     case sortLines
     case uniqueLines
     case trimTrailingWhitespace
@@ -17,6 +19,8 @@ enum TextTransform: String, CaseIterable, Identifiable {
         case .uppercase: "Uppercase"
         case .lowercase: "Lowercase"
         case .titlecase: "Title Case"
+        case .swapCase: "Swap Case"
+        case .reverseSelection: "Reverse Selection"
         case .sortLines: "Sort Lines"
         case .uniqueLines: "Unique Lines"
         case .trimTrailingWhitespace: "Trim Trailing Whitespace"

@@ -20,6 +20,11 @@ let package = Package(
                 .product(name: "STTextView", package: "STTextView")
             ],
             path: "Sources/SimpleLime"
+        ),
+        .testTarget(
+            name: "SimpleLimeTests",
+            dependencies: ["SimpleLime"],
+            path: "Tests/SimpleLimeTests"
         )
     ]
 )

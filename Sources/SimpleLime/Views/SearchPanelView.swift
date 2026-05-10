@@ -32,7 +32,32 @@ struct SearchPanelView: View {
                 .toggleStyle(.button)
                 .help("Use regular expression")
 
+                Toggle(isOn: $store.findMatchesCase) {
+                    Text("Aa")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                }
+                .toggleStyle(.button)
+                .help("Match case")
+
+                Toggle(isOn: $store.findWholeWord) {
+                    Text("ab")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                }
+                .toggleStyle(.button)
+                .help("Whole word")
+
+                if !store.findStatusText.isEmpty {
+                    Text(store.findStatusText)
+                        .font(.caption)
+                        .foregroundStyle(store.findValidationError == nil ? Color.secondary : Color.red)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .frame(minWidth: 74, alignment: .leading)
+                }
+
                 if store.findPanelMode != .global {
+                    Divider()
+
                     Button {
                         store.findPrevious()
                     } label: {
@@ -50,34 +75,52 @@ struct SearchPanelView: View {
                     Button {
                         store.selectAllMatches()
                     } label: {
-                        Text("Select All")
+                        Image(systemName: "selection.pin.in.out")
                     }
                     .help("Select all matches")
                 }
 
-                if store.findPanelMode == .replace {
+                if store.findPanelMode == .replace || store.findPanelMode == .global {
                     Divider()
 
                     TextField("Replace", text: $store.replaceText)
                         .textFieldStyle(.roundedBorder)
                         .frame(minWidth: 180, idealWidth: 260, maxWidth: 360)
 
-                    Button("Replace") {
-                        store.replaceCurrent()
-                    }
+                    if store.findPanelMode == .global {
+                        Button {
+                            store.replaceAllGlobalMatches()
+                        } label: {
+                            Label("Replace All", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .help("Replace all matches in open tabs and the opened folder")
+                        .disabled(store.findQuery.isEmpty || store.findValidationError != nil)
+                    } else {
+                        Button {
+                            store.replaceCurrent()
+                        } label: {
+                            Label("Replace", systemImage: "arrow.turn.down.right")
+                        }
+                        .disabled(store.findQuery.isEmpty || store.findValidationError != nil)
 
-                    Button("All") {
-                        store.replaceAll()
+                        Button {
+                            store.replaceAll()
+                        } label: {
+                            Label("All", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .disabled(store.findQuery.isEmpty || store.findValidationError != nil)
                     }
                 }
 
                 Spacer()
 
                 if store.findPanelMode == .global {
-                    Text("\(store.globalSearchResults.count)")
+                    Text(store.globalReplaceStatusText.isEmpty ? "\(store.globalSearchResults.count)" : store.globalReplaceStatusText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
+                        .lineLimit(1)
+                        .frame(maxWidth: 260, alignment: .trailing)
                 }
 
                 Button {
@@ -98,14 +141,14 @@ struct SearchPanelView: View {
                     .frame(height: globalResultsHeight)
             }
         }
-        .background(.regularMaterial)
+        .background(Color(nsColor: .windowBackgroundColor))
         .overlay(alignment: .bottom) {
             Divider()
         }
         .onAppear {
             isFindFocused = true
         }
-        .onChange(of: store.findPanelMode) { _ in
+        .onChange(of: store.findPanelMode) {
             isFindFocused = true
         }
     }
@@ -121,7 +164,7 @@ struct SearchPanelView: View {
         case .replace:
             return "Find"
         case .global:
-            return "Find in all tabs"
+            return store.documentCatalogRootPath == nil ? "Find in tabs" : "Find in tabs and folder"
         }
     }
 
@@ -181,6 +224,6 @@ private struct GlobalSearchResultsView: View {
                 }
             }
         }
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.75))
+        .background(Color(nsColor: .textBackgroundColor))
     }
 }

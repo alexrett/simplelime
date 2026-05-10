@@ -5,11 +5,86 @@ import Foundation
 final class EditorStore: ObservableObject {
     @Published var buffers: [EditorBuffer]
     @Published var selectedBufferID: UUID?
-    @Published var findQuery = ""
-    @Published var replaceText = ""
-    @Published var findUsesRegex = false
+    @Published var findQuery = "" {
+        didSet {
+            if findQuery != oldValue {
+                globalReplaceStatusText = ""
+            }
+        }
+    }
+    @Published var replaceText = "" {
+        didSet {
+            if replaceText != oldValue {
+                globalReplaceStatusText = ""
+            }
+        }
+    }
+    @Published var findUsesRegex = false {
+        didSet {
+            if findUsesRegex != oldValue {
+                globalReplaceStatusText = ""
+            }
+        }
+    }
+    @Published var findMatchesCase = false {
+        didSet {
+            if findMatchesCase != oldValue {
+                globalReplaceStatusText = ""
+            }
+        }
+    }
+    @Published var findWholeWord = false {
+        didSet {
+            if findWholeWord != oldValue {
+                globalReplaceStatusText = ""
+            }
+        }
+    }
+    @Published var globalReplaceStatusText = ""
     @Published var findPanelMode: FindPanelMode = .hidden
     @Published var isPreviewVisible = false
+    @Published var isOutlineVisible: Bool {
+        didSet {
+            UserDefaults.standard.set(isOutlineVisible, forKey: Self.outlineDefaultsKey)
+        }
+    }
+    @Published var isFocusModeEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isFocusModeEnabled, forKey: Self.focusModeDefaultsKey)
+        }
+    }
+    @Published var isTypewriterModeEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isTypewriterModeEnabled, forKey: Self.typewriterModeDefaultsKey)
+        }
+    }
+    @Published var isMiniMapVisible: Bool {
+        didSet {
+            UserDefaults.standard.set(isMiniMapVisible, forKey: Self.miniMapDefaultsKey)
+        }
+    }
+    @Published var isWysiwygModeEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isWysiwygModeEnabled, forKey: Self.wysiwygModeDefaultsKey)
+        }
+    }
+    @Published var isDocumentCatalogVisible: Bool {
+        didSet {
+            UserDefaults.standard.set(isDocumentCatalogVisible, forKey: Self.documentCatalogVisibleDefaultsKey)
+        }
+    }
+    @Published var documentCatalogRootPath: String? {
+        didSet {
+            if let documentCatalogRootPath {
+                UserDefaults.standard.set(documentCatalogRootPath, forKey: Self.documentCatalogRootDefaultsKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.documentCatalogRootDefaultsKey)
+            }
+        }
+    }
+    @Published var documentCatalogNodes: [DocumentCatalogNode] = []
+    @Published var documentCatalogQuery = ""
+    @Published var isCommandPaletteVisible = false
     @Published var fontSize: Double = 14
     @Published var wrapsLines: Bool {
         didSet {
@@ -38,6 +113,13 @@ final class EditorStore: ObservableObject {
     private var pendingFileLoadIDs = Set<UUID>()
 
     private static let wrapsLinesDefaultsKey = "editor.wrapsLines"
+    private static let outlineDefaultsKey = "editor.markdownOutline"
+    private static let focusModeDefaultsKey = "editor.focusMode"
+    private static let typewriterModeDefaultsKey = "editor.typewriterMode"
+    private static let miniMapDefaultsKey = "editor.miniMap"
+    private static let wysiwygModeDefaultsKey = "editor.markdownWysiwyg"
+    private static let documentCatalogVisibleDefaultsKey = "editor.documentCatalogVisible"
+    private static let documentCatalogRootDefaultsKey = "editor.documentCatalogRoot"
 
     init(
         windowGroupID: UUID = UUID(),
@@ -52,6 +134,13 @@ final class EditorStore: ObservableObject {
         self.persistence = persistence
         self.networkShare = networkShare
         self.wrapsLines = UserDefaults.standard.object(forKey: Self.wrapsLinesDefaultsKey) as? Bool ?? true
+        self.isOutlineVisible = UserDefaults.standard.object(forKey: Self.outlineDefaultsKey) as? Bool ?? false
+        self.isFocusModeEnabled = UserDefaults.standard.object(forKey: Self.focusModeDefaultsKey) as? Bool ?? false
+        self.isTypewriterModeEnabled = UserDefaults.standard.object(forKey: Self.typewriterModeDefaultsKey) as? Bool ?? false
+        self.isMiniMapVisible = UserDefaults.standard.object(forKey: Self.miniMapDefaultsKey) as? Bool ?? true
+        self.isWysiwygModeEnabled = UserDefaults.standard.object(forKey: Self.wysiwygModeDefaultsKey) as? Bool ?? false
+        self.isDocumentCatalogVisible = UserDefaults.standard.object(forKey: Self.documentCatalogVisibleDefaultsKey) as? Bool ?? false
+        self.documentCatalogRootPath = UserDefaults.standard.string(forKey: Self.documentCatalogRootDefaultsKey)
         let loaded: (buffers: [EditorBuffer], selectedID: UUID?)
 
         if let initialBuffers {
@@ -69,6 +158,8 @@ final class EditorStore: ObservableObject {
             selectedBufferID = loaded.selectedID ?? loaded.buffers.first?.id
         }
 
+        normalizeLoadedEditorModeState()
+
         if registerNetworkReceiver {
             networkShare.onReceivedNote = { [weak self] note in
                 self?.importSharedNote(note)
@@ -77,6 +168,10 @@ final class EditorStore: ObservableObject {
 
         if autoPersistOnInit {
             persistSoon()
+        }
+
+        if documentCatalogRootPath != nil {
+            refreshDocumentCatalog()
         }
     }
 
@@ -96,7 +191,39 @@ final class EditorStore: ObservableObject {
     }
 
     var globalSearchResults: [SearchResult] {
-        searchAllTabs(query: findQuery)
+        searchAllSources(query: findQuery)
+    }
+
+    var findStatusText: String {
+        if let error = findValidationError {
+            return error
+        }
+
+        guard !findQuery.isEmpty, let selectedBuffer else {
+            return ""
+        }
+
+        let matches = allMatches(in: selectedBuffer.text)
+        guard !matches.isEmpty else {
+            return "No matches"
+        }
+
+        let selected = normalizedRanges(selectedBuffer.selectionRanges, in: selectedBuffer.text).first
+        let currentIndex = selected.flatMap { selection in
+            matches.firstIndex { NSEqualRanges($0.range, selection.nsRange) }
+        } ?? 0
+
+        return "\(currentIndex + 1) of \(matches.count)"
+    }
+
+    var findValidationError: String? {
+        guard findUsesRegex, !findQuery.isEmpty else { return nil }
+        do {
+            _ = try makeFindRegex()
+            return nil
+        } catch {
+            return "Invalid regex"
+        }
     }
 
     var selectedBufferLanguage: EditorLanguage {
@@ -389,8 +516,95 @@ final class EditorStore: ObservableObject {
 
     func openFiles(at urls: [URL]) {
         for url in urls {
-            openFile(at: url)
+            if Self.isDirectoryURL(url) {
+                openFolder(at: url)
+            } else {
+                openFile(at: url)
+            }
         }
+    }
+
+    func openFolder() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = false
+        panel.resolvesAliases = true
+
+        guard panel.runModal() == .OK,
+              let url = panel.url else {
+            return
+        }
+
+        openFolder(at: url)
+    }
+
+    func openFolder(at url: URL) {
+        documentCatalogRootPath = url.path
+        documentCatalogQuery = ""
+        isDocumentCatalogVisible = true
+        refreshDocumentCatalog()
+    }
+
+    func closeFolder() {
+        documentCatalogRootPath = nil
+        documentCatalogNodes = []
+        documentCatalogQuery = ""
+    }
+
+    func toggleDocumentCatalog() {
+        isDocumentCatalogVisible.toggle()
+    }
+
+    func refreshDocumentCatalog() {
+        guard let rootPath = documentCatalogRootPath else {
+            documentCatalogNodes = []
+            return
+        }
+
+        let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true)
+        Task { [weak self, rootPath, rootURL] in
+            let nodes = await Task.detached(priority: .userInitiated) {
+                Self.buildDocumentCatalogNodes(rootURL: rootURL)
+            }.value
+
+            guard self?.documentCatalogRootPath == rootPath else { return }
+            self?.documentCatalogNodes = nodes
+        }
+    }
+
+    func documentCatalogFileMatches(for query: String, limit: Int = 30) -> [DocumentCatalogFileMatch] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let files = documentCatalogFileNodes(documentCatalogNodes)
+
+        if trimmed.isEmpty {
+            return files.prefix(limit).map {
+                DocumentCatalogFileMatch(
+                    url: $0.url,
+                    displayPath: documentCatalogDisplayPath(for: $0.url),
+                    score: 0
+                )
+            }
+        }
+
+        return files.compactMap { node -> DocumentCatalogFileMatch? in
+            let displayPath = documentCatalogDisplayPath(for: node.url)
+            let candidate = "\(displayPath) \(node.name)"
+            guard let score = Self.fuzzyScore(candidate: candidate, query: trimmed) else {
+                return nil
+            }
+
+            return DocumentCatalogFileMatch(url: node.url, displayPath: displayPath, score: score)
+        }
+        .sorted {
+            if $0.score == $1.score {
+                return $0.displayPath.localizedStandardCompare($1.displayPath) == .orderedAscending
+            }
+            return $0.score > $1.score
+        }
+        .prefix(limit)
+        .map(\.self)
     }
 
     func openFile(at url: URL) {
@@ -616,6 +830,119 @@ final class EditorStore: ObservableObject {
         wrapsLines.toggle()
     }
 
+    func toggleMarkdownPreview() {
+        if isPreviewVisible {
+            showSourceMode()
+        } else {
+            showMarkdownPreviewMode()
+        }
+    }
+
+    func toggleMarkdownOutline() {
+        isOutlineVisible.toggle()
+    }
+
+    func toggleFocusMode() {
+        if isWysiwygModeEnabled {
+            isWysiwygModeEnabled = false
+        }
+        isFocusModeEnabled.toggle()
+    }
+
+    func toggleTypewriterMode() {
+        isTypewriterModeEnabled.toggle()
+    }
+
+    func toggleMiniMap() {
+        if isWysiwygModeEnabled {
+            isWysiwygModeEnabled = false
+        }
+        isMiniMapVisible.toggle()
+    }
+
+    func toggleWysiwygMode() {
+        if isWysiwygModeEnabled {
+            showSourceMode()
+        } else {
+            showMarkdownWysiwygMode()
+        }
+    }
+
+    func showSourceMode() {
+        isPreviewVisible = false
+        isWysiwygModeEnabled = false
+    }
+
+    func showMarkdownPreviewMode() {
+        isPreviewVisible = true
+        isWysiwygModeEnabled = false
+    }
+
+    func showMarkdownWysiwygMode() {
+        isPreviewVisible = false
+        isWysiwygModeEnabled = true
+        isMiniMapVisible = false
+        isFocusModeEnabled = false
+    }
+
+    private func normalizeLoadedEditorModeState() {
+        guard isWysiwygModeEnabled else { return }
+
+        isPreviewVisible = false
+        if isMiniMapVisible {
+            isMiniMapVisible = false
+            UserDefaults.standard.set(false, forKey: Self.miniMapDefaultsKey)
+        }
+        if isFocusModeEnabled {
+            isFocusModeEnabled = false
+            UserDefaults.standard.set(false, forKey: Self.focusModeDefaultsKey)
+        }
+    }
+
+    func showCommandPalette() {
+        findPanelMode = .hidden
+        isCommandPaletteVisible = true
+    }
+
+    func hideCommandPalette() {
+        isCommandPaletteVisible = false
+    }
+
+    func toggleCommandPalette() {
+        if isCommandPaletteVisible {
+            hideCommandPalette()
+        } else {
+            showCommandPalette()
+        }
+    }
+
+    func jumpToHeading(_ heading: MarkdownHeading) {
+        guard let selectedIndex else { return }
+
+        buffers[selectedIndex].selectionRanges = [TextRange(location: heading.location, length: 0)]
+        persistSoon()
+    }
+
+    func jumpToLine(_ lineNumber: Int) {
+        guard let selectedIndex else { return }
+
+        let lineNumber = max(1, lineNumber)
+        let nsText = buffers[selectedIndex].text as NSString
+        var currentLine = 1
+        var location = 0
+
+        while location < nsText.length, currentLine < lineNumber {
+            let lineRange = nsText.lineRange(for: NSRange(location: location, length: 0))
+            let nextLocation = lineRange.location + max(lineRange.length, 1)
+            guard nextLocation > location else { break }
+            location = nextLocation
+            currentLine += 1
+        }
+
+        buffers[selectedIndex].selectionRanges = [TextRange(location: min(location, nsText.length), length: 0)]
+        persistSoon()
+    }
+
     func findNext() {
         if findQuery.isEmpty {
             showFind()
@@ -664,23 +991,103 @@ final class EditorStore: ObservableObject {
         }
 
         let buffer = buffers[selectedIndex]
-        let mutable = NSMutableString(string: buffers[selectedIndex].text)
-        let matches = allMatches(in: buffer.text)
+        guard let replacement = replacingAllMatches(in: buffer.text) else { return }
 
-        for match in matches.reversed() {
-            mutable.replaceCharacters(in: match.range, with: replacementString(for: match, in: buffer.text))
-        }
-
-        buffers[selectedIndex].text = mutable as String
+        buffers[selectedIndex].text = replacement.text
         buffers[selectedIndex].isDirty = true
         buffers[selectedIndex].updatedAt = Date()
-        buffers[selectedIndex].selectionRanges = matches.isEmpty
-            ? buffers[selectedIndex].selectionRanges
-            : [TextRange(location: matches[0].range.location, length: replaceText.utf16.count)]
+        buffers[selectedIndex].selectionRanges = [replacement.firstSelection]
         persistSoon()
     }
 
+    @discardableResult
+    func replaceAllGlobalMatches() -> Int {
+        guard !findQuery.isEmpty else {
+            showGlobalFind()
+            return 0
+        }
+
+        if let findValidationError {
+            globalReplaceStatusText = findValidationError
+            return 0
+        }
+
+        var replacementCount = 0
+        var changedDocumentCount = 0
+        var firstOpenChange: (index: Int, selection: TextRange)?
+        var openFileIdentities = Set<String>()
+
+        for index in buffers.indices {
+            if let path = buffers[index].filePath {
+                openFileIdentities.insert(fileIdentity(forPath: path))
+            }
+
+            guard let replacement = replacingAllMatches(in: buffers[index].text) else {
+                continue
+            }
+
+            buffers[index].text = replacement.text
+            buffers[index].isDirty = true
+            buffers[index].updatedAt = Date()
+            buffers[index].selectionRanges = [replacement.firstSelection]
+            replacementCount += replacement.count
+            changedDocumentCount += 1
+
+            if firstOpenChange == nil {
+                firstOpenChange = (index, replacement.firstSelection)
+            }
+        }
+
+        var failedNames: [String] = []
+
+        for node in documentCatalogFileNodes(documentCatalogNodes) {
+            let identity = fileIdentity(forURL: node.url)
+            guard !openFileIdentities.contains(identity) else { continue }
+
+            do {
+                var encoding = String.Encoding.utf8
+                let text = try String(contentsOf: node.url, usedEncoding: &encoding)
+                guard let replacement = replacingAllMatches(in: text) else {
+                    continue
+                }
+
+                try replacement.text.write(to: node.url, atomically: true, encoding: encoding)
+                replacementCount += replacement.count
+                changedDocumentCount += 1
+            } catch {
+                failedNames.append(node.name)
+            }
+        }
+
+        if let firstOpenChange {
+            selectedBufferID = buffers[firstOpenChange.index].id
+            buffers[firstOpenChange.index].selectionRanges = [firstOpenChange.selection]
+        }
+
+        if replacementCount > 0 {
+            persistSoon()
+        }
+
+        globalReplaceStatusText = replacementCount == 0
+            ? "No replacements"
+            : "Replaced \(replacementCount) \(replacementCount == 1 ? "match" : "matches") in \(changedDocumentCount) \(changedDocumentCount == 1 ? "document" : "documents")"
+
+        if !failedNames.isEmpty {
+            lastError = "Could not replace in \(failedNames.prefix(3).joined(separator: ", "))"
+        }
+
+        return replacementCount
+    }
+
     func addNextOccurrence() {
+        addOccurrence(direction: .next)
+    }
+
+    func addPreviousOccurrence() {
+        addOccurrence(direction: .previous)
+    }
+
+    private func addOccurrence(direction: FindDirection) {
         guard let selectedIndex else { return }
 
         let buffer = buffers[selectedIndex]
@@ -703,9 +1110,20 @@ final class EditorStore: ObservableObject {
 
         guard !query.isEmpty else { return }
 
-        let start = selections.map { $0.location + $0.length }.max() ?? 0
-        if let next = findRange(query: query, in: buffer.text, from: start, direction: .next, forceLiteral: true) {
-            buffers[selectedIndex].selectionRanges = selections + [next]
+        let start: Int
+        switch direction {
+        case .next:
+            start = selections.map { $0.location + $0.length }.max() ?? 0
+        case .previous:
+            start = selections.map(\.location).min() ?? 0
+        }
+
+        if let occurrence = findRange(query: query, in: buffer.text, from: start, direction: direction, forceLiteral: true),
+           !selections.contains(occurrence) {
+            let updated = (selections + [occurrence]).sorted { first, second in
+                first.location == second.location ? first.length < second.length : first.location < second.location
+            }
+            buffers[selectedIndex].selectionRanges = updated
             persistSoon()
         }
     }
@@ -753,11 +1171,46 @@ final class EditorStore: ObservableObject {
     }
 
     func selectSearchResult(_ result: SearchResult) {
-        selectedBufferID = result.bufferID
+        if let bufferID = result.bufferID {
+            selectedBufferID = bufferID
 
-        if let index = buffers.firstIndex(where: { $0.id == result.bufferID }) {
+            if let index = buffers.firstIndex(where: { $0.id == bufferID }) {
+                buffers[index].selectionRanges = [result.range]
+                persistSoon()
+            }
+            return
+        }
+
+        guard let filePath = result.filePath else { return }
+        if let index = buffers.firstIndex(where: { $0.filePath == filePath }) {
+            selectedBufferID = buffers[index].id
             buffers[index].selectionRanges = [result.range]
             persistSoon()
+            return
+        }
+
+        do {
+            let url = URL(fileURLWithPath: filePath)
+            var encoding = String.Encoding.utf8
+            let text = try String(contentsOf: url, usedEncoding: &encoding)
+            let now = Date()
+            let buffer = EditorBuffer(
+                id: UUID(),
+                title: url.lastPathComponent,
+                kind: .file,
+                filePath: filePath,
+                text: text,
+                language: EditorLanguage.detect(fileName: url.lastPathComponent, text: text),
+                createdAt: now,
+                updatedAt: now,
+                isDirty: false,
+                selectionRanges: [result.range]
+            )
+            buffers.append(buffer)
+            selectedBufferID = buffer.id
+            persistSoon()
+        } catch {
+            lastError = "Could not open \(URL(fileURLWithPath: filePath).lastPathComponent): \(error.localizedDescription)"
         }
     }
 
@@ -782,6 +1235,14 @@ final class EditorStore: ObservableObject {
         transformSelection(transform)
     }
 
+    func performEditorCommand(_ command: EditorCommand) {
+        _ = editorCommandHandler?(command)
+    }
+
+    func performMarkdownCommand(_ command: MarkdownCommand) {
+        _ = editorCommandHandler?(.markdown(command))
+    }
+
     func transformSelection(_ transform: TextTransform) {
         switch transform {
         case .uppercase:
@@ -790,6 +1251,10 @@ final class EditorStore: ObservableObject {
             replaceTargetText { $0.lowercased() }
         case .titlecase:
             replaceTargetText { $0.capitalized }
+        case .swapCase:
+            replaceTargetText { $0.swappingCase() }
+        case .reverseSelection:
+            replaceTargetText { String($0.reversed()) }
         case .sortLines:
             replaceTargetLines { text in
                 preserveTrailingNewline(text) { lines in
@@ -1052,6 +1517,10 @@ final class EditorStore: ObservableObject {
         return URL(fileURLWithPath: path, isDirectory: false).standardizedFileURL.path
     }
 
+    private static func isDirectoryURL(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+    }
+
     private func slicedText(_ text: String, line: Int?, limit: Int?) -> String {
         guard line != nil || limit != nil else {
             return text
@@ -1128,36 +1597,316 @@ final class EditorStore: ObservableObject {
         }
     }
 
-    private func searchAllTabs(query: String) -> [SearchResult] {
+    private nonisolated static func buildDocumentCatalogNodes(rootURL: URL) -> [DocumentCatalogNode] {
+        var remainingItems = 3000
+        return documentCatalogChildren(in: rootURL, remainingItems: &remainingItems)
+    }
+
+    private nonisolated static func documentCatalogChildren(in directoryURL: URL, remainingItems: inout Int) -> [DocumentCatalogNode] {
+        guard remainingItems > 0,
+              let urls = try? FileManager.default.contentsOfDirectory(
+                at: directoryURL,
+                includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+                options: [.skipsHiddenFiles]
+              ) else {
+            return []
+        }
+
+        var nodes: [DocumentCatalogNode] = []
+
+        for url in urls where remainingItems > 0 {
+            let name = url.lastPathComponent
+            guard !name.hasPrefix(".") else { continue }
+
+            let resourceValues = try? url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+            if resourceValues?.isDirectory == true {
+                guard shouldIncludeDocumentCatalogDirectory(name) else { continue }
+
+                var childRemaining = remainingItems - 1
+                let children = documentCatalogChildren(in: url, remainingItems: &childRemaining)
+                remainingItems = childRemaining
+
+                if !children.isEmpty {
+                    nodes.append(DocumentCatalogNode(url: url, isDirectory: true, children: children))
+                    remainingItems -= 1
+                }
+            } else if resourceValues?.isRegularFile == true, shouldIncludeDocumentCatalogFile(url) {
+                nodes.append(DocumentCatalogNode(url: url, isDirectory: false))
+                remainingItems -= 1
+            }
+        }
+
+        return nodes.sorted { first, second in
+            if first.isDirectory != second.isDirectory {
+                return first.isDirectory && !second.isDirectory
+            }
+
+            return first.name.localizedCaseInsensitiveCompare(second.name) == .orderedAscending
+        }
+    }
+
+    private nonisolated static func shouldIncludeDocumentCatalogDirectory(_ name: String) -> Bool {
+        let lowercased = name.lowercased()
+        let excluded = [
+            ".build",
+            "build",
+            "deriveddata",
+            "dist",
+            "node_modules",
+            "packages",
+            "vendor"
+        ]
+
+        return !excluded.contains(lowercased)
+    }
+
+    private nonisolated static func shouldIncludeDocumentCatalogFile(_ url: URL) -> Bool {
+        let name = url.lastPathComponent.lowercased()
+        let ext = url.pathExtension.lowercased()
+        let allowedExtensions: Set<String> = [
+            "bash",
+            "c",
+            "cc",
+            "conf",
+            "cpp",
+            "css",
+            "csv",
+            "env",
+            "fish",
+            "go",
+            "h",
+            "hpp",
+            "htm",
+            "html",
+            "ini",
+            "js",
+            "json",
+            "jsonl",
+            "log",
+            "markdown",
+            "md",
+            "mdown",
+            "mjs",
+            "plist",
+            "py",
+            "rb",
+            "rs",
+            "sass",
+            "scss",
+            "sh",
+            "swift",
+            "text",
+            "toml",
+            "ts",
+            "tsx",
+            "txt",
+            "xml",
+            "yaml",
+            "yml",
+            "zsh"
+        ]
+
+        if allowedExtensions.contains(ext) {
+            return true
+        }
+
+        return [
+            "changelog",
+            "dockerfile",
+            "gemfile",
+            "license",
+            "makefile",
+            "rakefile",
+            "readme"
+        ].contains(name)
+    }
+
+    private func searchAllSources(query: String) -> [SearchResult] {
         guard !query.isEmpty else { return [] }
 
-        var results: [SearchResult] = []
+        var results = searchAllTabs(query: query, limit: 500)
+        guard results.count < 500 else { return results }
 
-        for buffer in buffers {
-            let nsText = buffer.text as NSString
-            for match in allMatches(in: buffer.text) where results.count < 500 {
-                let lineRange = nsText.lineRange(for: match.range)
-                let excerpt = nsText.substring(with: lineRange)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-
-                results.append(
-                    SearchResult(
-                        bufferID: buffer.id,
-                        bufferTitle: buffer.displayTitle,
-                        lineNumber: lineNumber(at: match.range.location, in: buffer.text),
-                        excerpt: excerpt.isEmpty ? " " : excerpt,
-                        range: TextRange(match.range)
-                    )
-                )
+        let openFilePaths = Set(buffers.compactMap(\.filePath))
+        for node in documentCatalogFileNodes(documentCatalogNodes) where results.count < 500 {
+            let path = node.url.path
+            guard !openFilePaths.contains(path),
+                  let text = try? String(contentsOf: node.url) else {
+                continue
             }
+
+            results.append(
+                contentsOf: searchResults(
+                    in: text,
+                    title: documentCatalogDisplayPath(for: node.url),
+                    bufferID: nil,
+                    filePath: path,
+                    limit: 500 - results.count
+                )
+            )
         }
 
         return results
     }
 
+    private func searchAllTabs(query: String, limit: Int) -> [SearchResult] {
+        guard !query.isEmpty, limit > 0 else { return [] }
+
+        var results: [SearchResult] = []
+
+        for buffer in buffers {
+            results.append(
+                contentsOf: searchResults(
+                    in: buffer.text,
+                    title: buffer.displayTitle,
+                    bufferID: buffer.id,
+                    filePath: buffer.filePath,
+                    limit: limit - results.count
+                )
+            )
+            if results.count >= limit { break }
+        }
+
+        return results
+    }
+
+    private func searchResults(
+        in text: String,
+        title: String,
+        bufferID: UUID?,
+        filePath: String?,
+        limit: Int
+    ) -> [SearchResult] {
+        guard limit > 0 else { return [] }
+
+        let nsText = text as NSString
+        return allMatches(in: text)
+            .prefix(limit)
+            .map { match in
+                let lineRange = nsText.lineRange(for: match.range)
+                let excerpt = nsText.substring(with: lineRange)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                return SearchResult(
+                    bufferID: bufferID,
+                    filePath: filePath,
+                    bufferTitle: title,
+                    lineNumber: lineNumber(at: match.range.location, in: text),
+                    excerpt: excerpt.isEmpty ? " " : excerpt,
+                    range: TextRange(match.range)
+                )
+            }
+    }
+
+    private func documentCatalogFileNodes(_ nodes: [DocumentCatalogNode]) -> [DocumentCatalogNode] {
+        nodes.flatMap { node -> [DocumentCatalogNode] in
+            node.isDirectory ? documentCatalogFileNodes(node.children) : [node]
+        }
+    }
+
+    private func documentCatalogDisplayPath(for url: URL) -> String {
+        guard let rootPath = documentCatalogRootPath else {
+            return url.lastPathComponent
+        }
+
+        let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL
+        let fileURL = url.standardizedFileURL
+        let root = rootURL.path
+        let path = fileURL.path
+        if path.hasPrefix(root + "/") {
+            return String(path.dropFirst(root.count + 1))
+        }
+
+        return url.lastPathComponent
+    }
+
+    private nonisolated static func fuzzyScore(candidate: String, query: String) -> Int? {
+        let candidate = Array(candidate.lowercased())
+        let query = Array(query.lowercased())
+        guard !query.isEmpty else { return 0 }
+
+        var candidateIndex = 0
+        var score = 0
+        var previousMatchIndex: Int?
+
+        for queryCharacter in query {
+            var foundIndex: Int?
+            while candidateIndex < candidate.count {
+                if candidate[candidateIndex] == queryCharacter {
+                    foundIndex = candidateIndex
+                    break
+                }
+                candidateIndex += 1
+            }
+
+            guard let matchIndex = foundIndex else { return nil }
+
+            score += 10
+            if let previousMatchIndex, matchIndex == previousMatchIndex + 1 {
+                score += 14
+            }
+            if matchIndex == 0 || Self.isFuzzyWordBoundary(candidate[matchIndex - 1]) {
+                score += 10
+            }
+
+            previousMatchIndex = matchIndex
+            candidateIndex = matchIndex + 1
+        }
+
+        if String(candidate).contains(String(query)) {
+            score += 30
+        }
+
+        return score - candidate.count / 20
+    }
+
+    private nonisolated static func isFuzzyWordBoundary(_ character: Character) -> Bool {
+        character == "/" || character == "-" || character == "_" || character == "." || character == " "
+    }
+
+    private func fileIdentity(forURL url: URL) -> String {
+        fileIdentity(forPath: url.path)
+    }
+
+    private func fileIdentity(forPath path: String) -> String {
+        URL(fileURLWithPath: path)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .path
+    }
+
     private struct FindMatch {
         let range: NSRange
         let regexResult: NSTextCheckingResult?
+    }
+
+    private struct ReplacementResult {
+        let text: String
+        let count: Int
+        let firstSelection: TextRange
+    }
+
+    private func makeFindRegex() throws -> NSRegularExpression {
+        let options: NSRegularExpression.Options = findMatchesCase ? [] : [.caseInsensitive]
+        return try NSRegularExpression(pattern: findQuery, options: options)
+    }
+
+    private func replacingAllMatches(in text: String) -> ReplacementResult? {
+        let matches = allMatches(in: text)
+        guard !matches.isEmpty else { return nil }
+
+        let replacements = matches.map { replacementString(for: $0, in: text) }
+        let mutable = NSMutableString(string: text)
+
+        for (match, replacement) in zip(matches, replacements).reversed() {
+            mutable.replaceCharacters(in: match.range, with: replacement)
+        }
+
+        return ReplacementResult(
+            text: mutable as String,
+            count: matches.count,
+            firstSelection: TextRange(location: matches[0].range.location, length: replacements[0].utf16.count)
+        )
     }
 
     private func allMatches(in text: String) -> [FindMatch] {
@@ -1167,27 +1916,44 @@ final class EditorStore: ObservableObject {
         let fullRange = NSRange(location: 0, length: nsText.length)
 
         if findUsesRegex {
-            guard let regex = try? NSRegularExpression(pattern: findQuery, options: [.caseInsensitive]) else {
+            guard let regex = try? makeFindRegex() else {
                 return []
             }
 
             return regex.matches(in: text, range: fullRange)
                 .filter { $0.range.location != NSNotFound && $0.range.length > 0 }
+                .filter { !findWholeWord || isWholeWordMatch($0.range, in: nsText) }
                 .map { FindMatch(range: $0.range, regexResult: $0) }
         }
 
         var matches: [FindMatch] = []
         var searchLocation = 0
+        let options: NSString.CompareOptions = findMatchesCase ? [] : [.caseInsensitive]
 
         while searchLocation < nsText.length {
             let searchRange = NSRange(location: searchLocation, length: nsText.length - searchLocation)
-            let found = nsText.range(of: findQuery, options: [.caseInsensitive], range: searchRange)
+            let found = nsText.range(of: findQuery, options: options, range: searchRange)
             if found.location == NSNotFound { break }
-            matches.append(FindMatch(range: found, regexResult: nil))
+            if !findWholeWord || isWholeWordMatch(found, in: nsText) {
+                matches.append(FindMatch(range: found, regexResult: nil))
+            }
             searchLocation = found.location + max(found.length, 1)
         }
 
         return matches
+    }
+
+    private func isWholeWordMatch(_ range: NSRange, in nsText: NSString) -> Bool {
+        let beforeIndex = range.location - 1
+        let afterIndex = range.location + range.length
+        let beforeIsWord = beforeIndex >= 0 && isFindWordCharacter(nsText.character(at: beforeIndex))
+        let afterIsWord = afterIndex < nsText.length && isFindWordCharacter(nsText.character(at: afterIndex))
+        return !beforeIsWord && !afterIsWord
+    }
+
+    private func isFindWordCharacter(_ value: unichar) -> Bool {
+        guard let scalar = UnicodeScalar(value) else { return false }
+        return CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_")).contains(scalar)
     }
 
     private func firstMatch(in text: String, range: NSRange) -> FindMatch? {
@@ -1197,7 +1963,7 @@ final class EditorStore: ObservableObject {
     private func replacementString(for match: FindMatch, in text: String) -> String {
         guard findUsesRegex,
               let regexResult = match.regexResult,
-              let regex = try? NSRegularExpression(pattern: findQuery, options: [.caseInsensitive]) else {
+              let regex = try? makeFindRegex() else {
             return replaceText
         }
 
@@ -1269,7 +2035,10 @@ final class EditorStore: ObservableObject {
             }
         }
 
-        let options: NSString.CompareOptions = direction == .previous ? [.caseInsensitive, .backwards] : [.caseInsensitive]
+        var options: NSString.CompareOptions = findMatchesCase ? [] : [.caseInsensitive]
+        if direction == .previous {
+            options.insert(.backwards)
+        }
 
         switch direction {
         case .next:
@@ -1419,5 +2188,24 @@ private extension String {
             result.removeLast()
         }
         return result
+    }
+
+    func swappingCase() -> String {
+        map { character in
+            let value = String(character)
+            let uppercased = value.uppercased()
+            let lowercased = value.lowercased()
+
+            if value == uppercased, value != lowercased {
+                return lowercased
+            }
+
+            if value == lowercased, value != uppercased {
+                return uppercased
+            }
+
+            return value
+        }
+        .joined()
     }
 }

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 240" role="img" aria-labelledby="title desc">
+  <title id="title">Image path with spaces</title>
+  <desc id="desc">A local image fixture whose file name contains spaces.</desc>
+  <rect width="620" height="240" rx="22" fill="#312e81"/>
+  <rect x="26" y="26" width="568" height="188" rx="16" fill="#eef2ff"/>
+  <text x="54" y="102" fill="#312e81" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="34" font-weight="800">Spaces in image paths</text>
+  <text x="54" y="152" fill="#4338ca" font-family="SFMono-Regular, Menlo, monospace" font-size="21">assets/image with spaces.svg</text>
+</svg>

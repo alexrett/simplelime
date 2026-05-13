@@ -368,11 +368,12 @@ The next spike should produce these concrete artifacts:
      fallback classes. It also renders folded-range state from Swift as a
      read-only folded display without advertising full structured-folding
      feature support. Direct selection, move-line, language-aware
-     toggle-comment, and common text transform commands are now handled in
-     WebView, and direct mutating commands respect the same read-only/folded
-     guard as the editor state. This has only been covered by headless Swift
-     contract tests, embedded-JS syntax validation, and safe-mode app launch
-     verification so far.
+     toggle-comment, common text transform commands, and common Markdown
+     formatting/snippet commands are now handled in WebView, and direct
+     mutating commands respect the same read-only/folded guard as the editor
+     state. This has only been covered by headless Swift contract tests,
+     embedded-JS syntax validation, and safe-mode app launch verification so
+     far.
 
 4. Move integrations one by one.
    - Selection reporting.

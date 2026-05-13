@@ -134,6 +134,9 @@ struct CodeMirrorSourceEditorView: NSViewRepresentable {
                 }
                 webView?.evaluateJavaScript("window.simplelimeCommand && window.simplelimeCommand('\(command)');")
                 return true
+            case .markdown(let command):
+                webView?.evaluateJavaScript("window.simplelimeCommand && window.simplelimeCommand('markdown:\(command.rawValue)');")
+                return true
             case .deleteLine:
                 webView?.evaluateJavaScript("window.simplelimeCommand && window.simplelimeCommand('deleteLine');")
                 return true
@@ -158,8 +161,6 @@ struct CodeMirrorSourceEditorView: NSViewRepresentable {
             case .toggleComment:
                 webView?.evaluateJavaScript("window.simplelimeCommand && window.simplelimeCommand('toggleComment');")
                 return true
-            default:
-                return false
             }
         }
 
@@ -1273,6 +1274,206 @@ struct CodeMirrorSourceEditorView: NSViewRepresentable {
             );
           }
 
+          function wrapMarkdownSelections(view, left, right) {
+            const doc = view.state.doc;
+            const ranges = view.state.selection.ranges.map((range) => ({
+              from: Math.max(0, Math.min(range.from, range.to, doc.length)),
+              to: Math.max(0, Math.min(Math.max(range.from, range.to), doc.length))
+            }));
+            if (ranges.length === 0) return false;
+            const changes = [];
+            const selections = [];
+            let delta = 0;
+            for (const range of ranges) {
+              const selectedText = doc.sliceString(range.from, range.to);
+              const replacement = `${left}${selectedText}${right}`;
+              changes.push({ from: range.from, to: range.to, insert: replacement });
+              const selectionFrom = range.from + delta + left.length;
+              selections.push(EditorSelection.range(selectionFrom, selectionFrom + (range.to - range.from)));
+              delta += replacement.length - (range.to - range.from);
+            }
+            view.dispatch({
+              changes,
+              selection: EditorSelection.create(selections, Math.max(0, selections.length - 1))
+            });
+            return true;
+          }
+
+          function splitIndentLine(line) {
+            const match = line.match(/^(\\s*)(.*)$/);
+            return { indent: match ? match[1] : "", body: match ? match[2] : line };
+          }
+
+          function removeMarkdownPrefix(body, pattern) {
+            return body.replace(pattern, "");
+          }
+
+          function applyMarkdownHeading(level, line) {
+            const { indent, body } = splitIndentLine(line);
+            if (body.trim().length === 0) return line;
+            return `${indent}${"#".repeat(level)} ${removeMarkdownPrefix(body, /^#{1,6}\\s+/)}`;
+          }
+
+          function toggleMarkdownLinePrefix(prefix, line, pattern) {
+            const { indent, body } = splitIndentLine(line);
+            if (body.trim().length === 0) return line;
+            const cleaned = removeMarkdownPrefix(body, pattern);
+            return cleaned !== body ? `${indent}${cleaned}` : `${indent}${prefix}${body}`;
+          }
+
+          function transformMarkdownLines(view, transform) {
+            const doc = view.state.doc;
+            const ranges = selectedLineRanges(view);
+            if (ranges.length === 0) return false;
+            return replaceDocumentRanges(
+              view,
+              ranges,
+              ranges.map((range) => {
+                const { lines, hasTrailingNewline } = splitNormalizedLines(doc.sliceString(range.from, range.to));
+                return joinNormalizedLines(transform(lines), hasTrailingNewline);
+              })
+            );
+          }
+
+          function needsLeadingBlankLine(location, doc) {
+            if (location <= 0) return false;
+            return !doc.sliceString(0, Math.min(location, doc.length)).endsWith("\\n\\n");
+          }
+
+          function needsTrailingBlankLine(location, doc) {
+            if (location >= doc.length) return false;
+            return !doc.sliceString(Math.max(0, location), doc.length).startsWith("\\n\\n");
+          }
+
+          function insertMarkdownSnippet(view, snippet, selectOffset, selectLength) {
+            const doc = view.state.doc;
+            const range = view.state.selection.main;
+            const from = Math.max(0, Math.min(range.from, range.to, doc.length));
+            const to = Math.max(0, Math.min(Math.max(range.from, range.to), doc.length));
+            const prefix = needsLeadingBlankLine(from, doc) ? "\\n\\n" : "";
+            const suffix = needsTrailingBlankLine(to, doc) ? "\\n\\n" : "";
+            const insertion = `${prefix}${snippet}${suffix}`;
+            view.dispatch({
+              changes: { from, to, insert: insertion },
+              selection: EditorSelection.create([
+                EditorSelection.range(
+                  from + prefix.length + selectOffset,
+                  from + prefix.length + selectOffset + selectLength
+                )
+              ])
+            });
+            return true;
+          }
+
+          function insertMarkdownLink(view) {
+            const doc = view.state.doc;
+            const ranges = view.state.selection.ranges.map((range) => ({
+              from: Math.max(0, Math.min(range.from, range.to, doc.length)),
+              to: Math.max(0, Math.min(Math.max(range.from, range.to), doc.length))
+            }));
+            if (ranges.length === 0) return false;
+            const changes = [];
+            const selections = [];
+            let delta = 0;
+            for (const range of ranges) {
+              const selectedText = doc.sliceString(range.from, range.to);
+              const text = selectedText.length > 0 ? selectedText : "link";
+              const replacement = `[${text}](https://example.com)`;
+              changes.push({ from: range.from, to: range.to, insert: replacement });
+              const selectionFrom = range.from + delta + 1;
+              selections.push(EditorSelection.range(selectionFrom, selectionFrom + text.length));
+              delta += replacement.length - (range.to - range.from);
+            }
+            view.dispatch({
+              changes,
+              selection: EditorSelection.create(selections, Math.max(0, selections.length - 1))
+            });
+            return true;
+          }
+
+          function insertMarkdownCodeFence(view) {
+            const doc = view.state.doc;
+            const selectedRanges = view.state.selection.ranges.filter((range) => range.from !== range.to);
+            if (selectedRanges.length === 0) {
+              const cursor = Math.max(0, Math.min(view.state.selection.main.head, doc.length));
+              const insertion = "```\\n\\n```";
+              view.dispatch({
+                changes: { from: cursor, to: cursor, insert: insertion },
+                selection: EditorSelection.create([EditorSelection.cursor(cursor + 4)])
+              });
+              return true;
+            }
+
+            const ranges = selectedLineRanges(view);
+            const replacements = ranges.map((range) => {
+              const text = doc.sliceString(range.from, range.to);
+              return "```\\n" + (text.endsWith("\\n") ? text : text + "\\n") + "```";
+            });
+            const changes = [];
+            const selections = [];
+            let delta = 0;
+            for (let index = 0; index < ranges.length; index += 1) {
+              const range = ranges[index];
+              const replacement = replacements[index];
+              changes.push({ from: range.from, to: range.to, insert: replacement });
+              const selectionFrom = range.from + delta + 4;
+              selections.push(EditorSelection.range(selectionFrom, selectionFrom + (range.to - range.from)));
+              delta += replacement.length - (range.to - range.from);
+            }
+            view.dispatch({
+              changes,
+              selection: EditorSelection.create(selections, Math.max(0, selections.length - 1))
+            });
+            return true;
+          }
+
+          function performMarkdownCommand(view, command) {
+            switch (command) {
+              case "bold":
+                return wrapMarkdownSelections(view, "**", "**");
+              case "italic":
+                return wrapMarkdownSelections(view, "*", "*");
+              case "inlineCode":
+                return wrapMarkdownSelections(view, "`", "`");
+              case "strikethrough":
+                return wrapMarkdownSelections(view, "~~", "~~");
+              case "highlight":
+                return wrapMarkdownSelections(view, "==", "==");
+              case "subscript":
+                return wrapMarkdownSelections(view, "~", "~");
+              case "superscript":
+                return wrapMarkdownSelections(view, "^", "^");
+              case "heading1":
+                return transformMarkdownLines(view, (lines) => lines.map((line) => applyMarkdownHeading(1, line)));
+              case "heading2":
+                return transformMarkdownLines(view, (lines) => lines.map((line) => applyMarkdownHeading(2, line)));
+              case "heading3":
+                return transformMarkdownLines(view, (lines) => lines.map((line) => applyMarkdownHeading(3, line)));
+              case "unorderedList":
+                return transformMarkdownLines(view, (lines) => lines.map((line) => toggleMarkdownLinePrefix("- ", line, /^[-*+]\\s+/)));
+              case "orderedList":
+                return transformMarkdownLines(view, (lines) => lines.map((line, index) => toggleMarkdownLinePrefix(`${index + 1}. `, line, /^\\d+[.)]\\s+/)));
+              case "taskList":
+                return transformMarkdownLines(view, (lines) => lines.map((line) => toggleMarkdownLinePrefix("- [ ] ", line, /^[-*+]\\s+\\[[ xX]\\]\\s+/)));
+              case "quote":
+                return transformMarkdownLines(view, (lines) => lines.map((line) => toggleMarkdownLinePrefix("> ", line, /^>\\s?/)));
+              case "link":
+                return insertMarkdownLink(view);
+              case "image":
+                return insertMarkdownSnippet(view, "![image](image.png)", 9, 9);
+              case "table":
+                return insertMarkdownSnippet(view, "| Column 1 | Column 2 |\\n| --- | --- |\\n|  |  |", 2, 8);
+              case "codeFence":
+                return insertMarkdownCodeFence(view);
+              case "mathBlock":
+                return insertMarkdownSnippet(view, "$$\\nx = y\\n$$", 3, 5);
+              case "mermaidDiagram":
+                return insertMarkdownSnippet(view, "```mermaid\\ngraph TD\\n  A-->B\\n```", 11, 16);
+              default:
+                return false;
+            }
+          }
+
           window.simplelimeCommand = function(command) {
             if (!editorView) return false;
             const canMutate = hostStateIsEditable(currentState);
@@ -1282,6 +1483,7 @@ struct CodeMirrorSourceEditorView: NSViewRepresentable {
             if (command === "indent") return indentMore(editorView);
             if (command === "outdent") return indentLess(editorView);
             if (command.startsWith("transform:")) return performTextTransform(editorView, command.slice("transform:".length));
+            if (command.startsWith("markdown:")) return performMarkdownCommand(editorView, command.slice("markdown:".length));
             if (command === "toggleComment") return toggleLineComments(editorView);
             if (command === "moveLineUp") return moveSelectedLines(editorView, -1);
             if (command === "moveLineDown") return moveSelectedLines(editorView, 1);

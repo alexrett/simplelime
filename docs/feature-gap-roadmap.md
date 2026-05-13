@@ -94,13 +94,14 @@ repo issues or PRs without losing the original intent.
     read-only folded display, with textarea fallback folded text. It still does
     not claim full structured-folding parity because native fold gutter/toggle
     UI is not ported.
-  - CodeMirror direct selection/line movement/comment/transform command and
-    read-only guard slice shipped: expand-line, split-selection, move-line
-    up/down, language-aware toggle-comment, and common text transforms now
-    execute inside the WebView bridge, while direct mutating commands are
-    blocked whenever the CodeMirror state is read-only or showing host-provided
-    folded ranges. JSON minify/format and Markdown table formatting still use
-    the Swift store fallback because they reuse existing structured parsers.
+  - CodeMirror direct selection/line movement/comment/transform/Markdown
+    command and read-only guard slice shipped: expand-line, split-selection,
+    move-line up/down, language-aware toggle-comment, common text transforms,
+    and common Markdown formatting/snippet commands now execute inside the
+    WebView bridge, while direct mutating commands are blocked whenever the
+    CodeMirror state is read-only or showing host-provided folded ranges. JSON
+    minify/format and Markdown table formatting still use the Swift store
+    fallback because they reuse existing structured parsers.
   - Remaining architecture decision: large-file source tabs are still a
     virtualized read-only full-file renderer plus editable bounded chunks, not a
     true virtual editable document model. Clicking a visible large-file line can

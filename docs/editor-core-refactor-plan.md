@@ -339,9 +339,11 @@ The next spike should produce these concrete artifacts:
      CodeMirror and as folded text in the textarea fallback, while the engine
      still does not claim full structured-folding parity because the native fold
      gutter/toggle UI has not been ported. Direct expand-line,
-     split-selection, move-line, and language-aware toggle-comment commands now
-     run inside the CodeMirror view instead of falling back to the store, and
-     mutating direct commands are rejected when the bridge is read-only because
+     split-selection, move-line, language-aware toggle-comment, and common text
+     transform commands now run inside the CodeMirror view instead of falling
+     back to the store. JSON minify/format and Markdown table formatting remain
+     on the Swift fallback path because they share existing structured parsers.
+     Mutating direct commands are rejected when the bridge is read-only because
      of buffer policy or folded display state.
      It is deliberately marked as a
      limited prototype until remaining macro parity, folding/minimap, and
@@ -365,11 +367,12 @@ The next spike should produce these concrete artifacts:
      focus/typewriter mode state into CodeMirror theme/decorations plus textarea
      fallback classes. It also renders folded-range state from Swift as a
      read-only folded display without advertising full structured-folding
-     feature support. Direct selection, move-line, and language-aware
-     toggle-comment commands are now handled in WebView, and direct mutating
-     commands respect the same read-only/folded guard as the editor state. This
-     has only been covered by headless Swift contract tests, embedded-JS syntax
-     validation, and safe-mode app launch verification so far.
+     feature support. Direct selection, move-line, language-aware
+     toggle-comment, and common text transform commands are now handled in
+     WebView, and direct mutating commands respect the same read-only/folded
+     guard as the editor state. This has only been covered by headless Swift
+     contract tests, embedded-JS syntax validation, and safe-mode app launch
+     verification so far.
 
 4. Move integrations one by one.
    - Selection reporting.

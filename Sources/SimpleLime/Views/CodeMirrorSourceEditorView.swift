@@ -128,6 +128,12 @@ struct CodeMirrorSourceEditorView: NSViewRepresentable {
 
         func perform(_ command: EditorCommand) -> Bool {
             switch command {
+            case .transform(let transform):
+                guard let command = Self.codeMirrorTransformCommand(for: transform) else {
+                    return false
+                }
+                webView?.evaluateJavaScript("window.simplelimeCommand && window.simplelimeCommand('\(command)');")
+                return true
             case .deleteLine:
                 webView?.evaluateJavaScript("window.simplelimeCommand && window.simplelimeCommand('deleteLine');")
                 return true
@@ -154,6 +160,16 @@ struct CodeMirrorSourceEditorView: NSViewRepresentable {
                 return true
             default:
                 return false
+            }
+        }
+
+        private static func codeMirrorTransformCommand(for transform: TextTransform) -> String? {
+            switch transform {
+            case .uppercase, .lowercase, .titlecase, .swapCase, .reverseSelection,
+                    .sortLines, .uniqueLines, .trimTrailingWhitespace, .duplicateLine, .joinLines:
+                return "transform:\(transform.rawValue)"
+            case .formatJSON, .minifyJSON, .formatMarkdownTables:
+                return nil
             }
         }
 
@@ -1076,6 +1092,187 @@ struct CodeMirrorSourceEditorView: NSViewRepresentable {
             return true;
           }
 
+          function mergeDocumentRanges(ranges) {
+            return ranges
+              .sort((first, second) => first.from - second.from)
+              .reduce((merged, range) => {
+                const previous = merged[merged.length - 1];
+                if (previous && range.from <= previous.to) {
+                  previous.to = Math.max(previous.to, range.to);
+                } else {
+                  merged.push({ from: range.from, to: range.to });
+                }
+                return merged;
+              }, []);
+          }
+
+          function selectedTextRanges(view) {
+            const doc = view.state.doc;
+            const ranges = view.state.selection.ranges
+              .filter((range) => range.from !== range.to)
+              .map((range) => ({
+                from: Math.max(0, Math.min(range.from, range.to, doc.length)),
+                to: Math.max(0, Math.min(Math.max(range.from, range.to), doc.length))
+              }));
+            return ranges.length > 0 ? mergeDocumentRanges(ranges) : [{ from: 0, to: doc.length }];
+          }
+
+          function selectedOrAllLineRanges(view) {
+            const doc = view.state.doc;
+            const selectedRanges = view.state.selection.ranges.filter((range) => range.from !== range.to);
+            if (selectedRanges.length === 0) return [{ from: 0, to: doc.length }];
+            return selectedLineRanges(view);
+          }
+
+          function replaceDocumentRanges(view, ranges, replacements) {
+            if (ranges.length !== replacements.length) return false;
+            const changes = [];
+            const selections = [];
+            let delta = 0;
+            for (let index = 0; index < ranges.length; index += 1) {
+              const range = ranges[index];
+              const replacement = replacements[index];
+              changes.push({ from: range.from, to: range.to, insert: replacement });
+              const selectionFrom = range.from + delta;
+              selections.push(EditorSelection.range(selectionFrom, selectionFrom + replacement.length));
+              delta += replacement.length - (range.to - range.from);
+            }
+            view.dispatch({
+              changes,
+              selection: EditorSelection.create(selections, Math.max(0, selections.length - 1))
+            });
+            return true;
+          }
+
+          function swapCaseText(text) {
+            return Array.from(text).map((character) => {
+              const lower = character.toLocaleLowerCase();
+              const upper = character.toLocaleUpperCase();
+              if (character === lower && character !== upper) return upper;
+              if (character === upper && character !== lower) return lower;
+              return character;
+            }).join("");
+          }
+
+          function titlecaseText(text) {
+            return text.replace(/\\S+/g, (word) => {
+              const characters = Array.from(word);
+              if (characters.length === 0) return word;
+              return characters[0].toLocaleUpperCase() + characters.slice(1).join("").toLocaleLowerCase();
+            });
+          }
+
+          function splitNormalizedLines(text) {
+            const hasTrailingNewline = text.endsWith("\\n") || text.endsWith("\\r");
+            const normalized = text.replace(/\\r\\n/g, "\\n").replace(/\\r/g, "\\n");
+            const lines = normalized.split("\\n");
+            if (hasTrailingNewline && lines[lines.length - 1] === "") lines.pop();
+            return { lines, hasTrailingNewline };
+          }
+
+          function joinNormalizedLines(lines, hasTrailingNewline) {
+            const output = lines.join("\\n");
+            return hasTrailingNewline ? `${output}\\n` : output;
+          }
+
+          function transformLineText(text, transform) {
+            if (transform === "trimTrailingWhitespace") {
+              return text.replace(/[ \\t]+(?=\\r?\\n|\\r|$)/g, "");
+            }
+
+            if (transform === "joinLines") {
+              return text
+                .replace(/\\r\\n/g, "\\n")
+                .replace(/\\r/g, "\\n")
+                .split("\\n")
+                .map((line) => line.trim())
+                .filter((line) => line.length > 0)
+                .join(" ");
+            }
+
+            const { lines, hasTrailingNewline } = splitNormalizedLines(text);
+            if (transform === "sortLines") {
+              return joinNormalizedLines(
+                lines.slice().sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" })),
+                hasTrailingNewline
+              );
+            }
+
+            if (transform === "uniqueLines") {
+              const seen = new Set();
+              return joinNormalizedLines(
+                lines.filter((line) => {
+                  if (seen.has(line)) return false;
+                  seen.add(line);
+                  return true;
+                }),
+                hasTrailingNewline
+              );
+            }
+
+            return null;
+          }
+
+          function duplicateSelectionOrCurrentLine(view) {
+            const doc = view.state.doc;
+            const selectedRanges = view.state.selection.ranges
+              .filter((range) => range.from !== range.to)
+              .map((range) => ({
+                from: Math.max(0, Math.min(range.from, range.to, doc.length)),
+                to: Math.max(0, Math.min(Math.max(range.from, range.to), doc.length))
+              }));
+            if (selectedRanges.length > 0) {
+              const ranges = mergeDocumentRanges(selectedRanges);
+              return replaceDocumentRanges(
+                view,
+                ranges,
+                ranges.map((range) => {
+                  const text = doc.sliceString(range.from, range.to);
+                  return text + text;
+                })
+              );
+            }
+
+            const cursor = Math.max(0, Math.min(view.state.selection.main.head, doc.length));
+            const line = doc.lineAt(cursor);
+            const to = lineRangeEnd(doc, line);
+            const text = doc.sliceString(line.from, to);
+            const insertion = text.endsWith("\\n") ? text : `\\n${text}`;
+            view.dispatch({
+              changes: { from: to, to: to, insert: insertion },
+              selection: EditorSelection.create([EditorSelection.range(to, to + insertion.length)])
+            });
+            return true;
+          }
+
+          function performTextTransform(view, transform) {
+            const doc = view.state.doc;
+            if (transform === "duplicateLine") return duplicateSelectionOrCurrentLine(view);
+
+            if (["sortLines", "uniqueLines", "trimTrailingWhitespace", "joinLines"].includes(transform)) {
+              const ranges = selectedOrAllLineRanges(view);
+              const replacements = ranges.map((range) => transformLineText(doc.sliceString(range.from, range.to), transform));
+              if (replacements.some((replacement) => replacement === null)) return false;
+              return replaceDocumentRanges(view, ranges, replacements);
+            }
+
+            const textTransformers = {
+              uppercase: (text) => text.toLocaleUpperCase(),
+              lowercase: (text) => text.toLocaleLowerCase(),
+              titlecase: titlecaseText,
+              swapCase: swapCaseText,
+              reverseSelection: (text) => Array.from(text).reverse().join("")
+            };
+            const transformer = textTransformers[transform];
+            if (!transformer) return false;
+            const ranges = selectedTextRanges(view);
+            return replaceDocumentRanges(
+              view,
+              ranges,
+              ranges.map((range) => transformer(doc.sliceString(range.from, range.to)))
+            );
+          }
+
           window.simplelimeCommand = function(command) {
             if (!editorView) return false;
             const canMutate = hostStateIsEditable(currentState);
@@ -1084,6 +1281,7 @@ struct CodeMirrorSourceEditorView: NSViewRepresentable {
             if (!canMutate) return false;
             if (command === "indent") return indentMore(editorView);
             if (command === "outdent") return indentLess(editorView);
+            if (command.startsWith("transform:")) return performTextTransform(editorView, command.slice("transform:".length));
             if (command === "toggleComment") return toggleLineComments(editorView);
             if (command === "moveLineUp") return moveSelectedLines(editorView, -1);
             if (command === "moveLineDown") return moveSelectedLines(editorView, 1);

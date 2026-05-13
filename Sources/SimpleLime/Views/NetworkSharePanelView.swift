@@ -44,6 +44,7 @@ struct NetworkSharePanelView: View {
             VStack(alignment: .leading, spacing: 14) {
                 localDevice
                 collaborationStatus
+                relayControls
 
                 if network.peers.isEmpty {
                     emptyState
@@ -76,6 +77,80 @@ struct NetworkSharePanelView: View {
                 .font(.system(size: 13, weight: .semibold))
                 .lineLimit(1)
                 .truncationMode(.middle)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var relayControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Image(systemName: "link")
+                    .foregroundStyle(.secondary)
+                Text("Internet Relay")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+            }
+
+            if let relay = store.collaborationRelayState {
+                Text(relay.statusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(relay.shareURL.absoluteString)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            } else {
+                Text("Host this document through a self-hosted relay or join a relay link.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    store.startSelfHostedCollaborationRelay()
+                } label: {
+                    Label("Host", systemImage: "antenna.radiowaves.left.and.right")
+                }
+                .controlSize(.small)
+
+                Button {
+                    store.joinCollaborationRelayWithPrompt()
+                } label: {
+                    Label("Join", systemImage: "link.badge.plus")
+                }
+                .controlSize(.small)
+
+                Button {
+                    store.copyCollaborationRelayLink()
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.borderless)
+                .disabled(store.collaborationRelayState?.shareURL == nil)
+                .help("Copy relay link")
+
+                Button {
+                    store.stopCollaborationRelay()
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.borderless)
+                .disabled(store.collaborationRelayState?.isRunning != true)
+                .help("Stop relay")
+            }
+
+            if let status = store.collaborationRelayStatus {
+                Text(status)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(10)

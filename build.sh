@@ -60,7 +60,7 @@ app)
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
-            <key>CFBundleTypeName</key><string>Text Document</string>
+            <key>CFBundleTypeName</key><string>Document</string>
             <key>CFBundleTypeRole</key><string>Editor</string>
             <key>LSHandlerRank</key><string>Alternate</string>
             <key>LSItemContentTypes</key>
@@ -71,7 +71,22 @@ app)
                 <string>public.json</string>
                 <string>public.xml</string>
                 <string>public.shell-script</string>
+                <string>public.comma-separated-values-text</string>
+                <string>public.tab-separated-values-text</string>
+                <string>public.image</string>
+                <string>com.adobe.pdf</string>
+                <string>public.data</string>
                 <string>net.daringfireball.markdown</string>
+            </array>
+        </dict>
+    </array>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>SimpleLime Collaboration Link</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>simplelime</string>
             </array>
         </dict>
     </array>
@@ -85,6 +100,9 @@ app)
     <key>NSHighResolutionCapable</key><true/>
     <key>NSHumanReadableCopyright</key><string>© 2026 Aleksei Malikov. MIT License.</string>
     <key>NSLocalNetworkUsageDescription</key><string>SimpleLime uses the local network to find trusted devices and exchange notes between your Macs.</string>
+    <key>NSMicrophoneUsageDescription</key><string>SimpleLime uses the microphone when you start Voice Scribe to append dictated transcripts to your notes.</string>
+    <key>NSAudioCaptureUsageDescription</key><string>SimpleLime captures system audio when you choose system audio or meeting audio in Voice Scribe.</string>
+    <key>NSSpeechRecognitionUsageDescription</key><string>SimpleLime uses speech recognition when you start Voice Scribe to transcribe your microphone or system audio input.</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict>
 </plist>

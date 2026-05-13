@@ -119,6 +119,27 @@ final class MarkdownPreviewParserTests: XCTestCase {
         XCTAssertFalse(markdown.contains("==new=="), markdown)
     }
 
+    func testRecognizesWhiteboardWidgetFence() {
+        let board = WhiteboardDocument.empty
+            .appending(.text(rect: WhiteboardRect(x: 0.1, y: 0.1, width: 0.2, height: 0.08), text: "Map"))
+        let document = MarkdownPreviewParser.parseDocument(
+            """
+            # Notes
+
+            ```sldraw
+            \(board.encodedText())
+            ```
+            """
+        )
+
+        XCTAssertTrue(document.blocks.contains { block in
+            if case .whiteboard(let source) = block.kind {
+                return WhiteboardDocument.decode(from: source).renderItems.first?.text == "Map"
+            }
+            return false
+        })
+    }
+
     private func repositoryRootURL() -> URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

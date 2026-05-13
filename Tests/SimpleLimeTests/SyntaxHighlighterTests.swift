@@ -79,7 +79,30 @@ final class SyntaxHighlighterTests: XCTestCase {
         XCTAssertFalse(color(at: afterFenceRange.location, in: textView)?.isEqual(NSColor.systemBlue) == true)
     }
 
+    func testTypographicDashesAreVisuallyDistinguished() {
+        let text = "hyphen - en – em — minus −"
+        let textView = NSTextView()
+        textView.string = text
+
+        SyntaxHighlighter.apply(to: textView, language: .plain, fontSize: 14)
+
+        let nsText = text as NSString
+        let hyphenRange = nsText.range(of: "-")
+        let enDashRange = nsText.range(of: "–")
+        let emDashRange = nsText.range(of: "—")
+        let minusRange = nsText.range(of: "−")
+
+        XCTAssertNil(backgroundColor(at: hyphenRange.location, in: textView))
+        XCTAssertNotNil(backgroundColor(at: enDashRange.location, in: textView))
+        XCTAssertNotNil(backgroundColor(at: emDashRange.location, in: textView))
+        XCTAssertNotNil(backgroundColor(at: minusRange.location, in: textView))
+    }
+
     private func color(at location: Int, in textView: NSTextView) -> NSColor? {
         textView.textStorage?.attribute(.foregroundColor, at: location, effectiveRange: nil) as? NSColor
+    }
+
+    private func backgroundColor(at location: Int, in textView: NSTextView) -> NSColor? {
+        textView.textStorage?.attribute(.backgroundColor, at: location, effectiveRange: nil) as? NSColor
     }
 }

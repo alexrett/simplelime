@@ -4325,6 +4325,8 @@ private final class MarkdownWYSIWYGWebView: WKWebView {
             shortcut = .toggleFocusMode
         case 17 where flags.contains(.option) && !flags.contains(.shift):
             shortcut = .toggleTypewriterMode
+        case 38 where flags.contains(.shift):
+            shortcut = .toggleTerminal
         case 3 where flags.contains(.shift):
             shortcut = .showGlobalFind
         case 3:

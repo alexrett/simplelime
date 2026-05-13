@@ -3,15 +3,87 @@ set -e
 
 APP_BUNDLE="$(cd "$(dirname "$0")/../.." && pwd)"
 
-case "${1:-}" in
-  -h|--help)
-    echo "usage: simplelime [file ...]"
-    exit 0
-    ;;
-esac
+APP_ARGS=()
+FILES=()
+AUTOMATION_COMMAND=""
+AUTOMATION_TEXT=""
 
-if [[ $# -eq 0 ]]; then
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  print -r -- "$value"
+}
+
+send_automation_command() {
+  local command="$1"
+  local text="${2:-}"
+  local escaped_command escaped_text body
+  escaped_command="$(json_escape "$command")"
+
+  if [[ -n "$text" ]]; then
+    escaped_text="$(json_escape "$text")"
+    body="{\"command\":\"$escaped_command\",\"text\":\"$escaped_text\"}"
+  else
+    body="{\"command\":\"$escaped_command\"}"
+  fi
+
+  exec /usr/bin/curl -fsS \
+    -X POST \
+    -H 'Content-Type: application/json' \
+    --data "$body" \
+    http://127.0.0.1:48777/v1/command
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      echo "usage: simplelime [--safe-mode] [file ...]"
+      echo "       simplelime --force-close-path <path-or-tab-title>"
+      exit 0
+      ;;
+    --safe-mode|--simplelime-safe-mode)
+      APP_ARGS+=("$1")
+      ;;
+    --force-close-path|--force-close-tab)
+      flag="$1"
+      shift
+      if [[ $# -eq 0 ]]; then
+        echo "simplelime: $flag requires a path, file name, or tab title" >&2
+        exit 64
+      fi
+      AUTOMATION_COMMAND="forceClosePath"
+      AUTOMATION_TEXT="$1"
+      ;;
+    --)
+      shift
+      FILES+=("$@")
+      break
+      ;;
+    *)
+      FILES+=("$1")
+      ;;
+  esac
+  shift
+done
+
+if [[ -n "$AUTOMATION_COMMAND" ]]; then
+  send_automation_command "$AUTOMATION_COMMAND" "$AUTOMATION_TEXT"
+fi
+
+if [[ ${#FILES[@]} -eq 0 && ${#APP_ARGS[@]} -eq 0 ]]; then
   exec /usr/bin/open -a "$APP_BUNDLE"
 fi
 
-exec /usr/bin/open -a "$APP_BUNDLE" -- "$@"
+if [[ ${#FILES[@]} -eq 0 ]]; then
+  exec /usr/bin/open -a "$APP_BUNDLE" --args "${APP_ARGS[@]}"
+fi
+
+if [[ ${#APP_ARGS[@]} -eq 0 ]]; then
+  exec /usr/bin/open -a "$APP_BUNDLE" -- "${FILES[@]}"
+fi
+
+exec /usr/bin/open -a "$APP_BUNDLE" -- "${FILES[@]}" --args "${APP_ARGS[@]}"

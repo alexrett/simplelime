@@ -122,6 +122,10 @@ struct MarkdownPreviewView: View {
                         .stroke(Color(nsColor: .separatorColor))
                 }
 
+        case .whiteboard(let value):
+            WhiteboardMarkdownWidgetView(source: value)
+                .frame(minHeight: 260)
+
         case .math(let value):
             VStack(alignment: .leading, spacing: 6) {
                 Text("Math")
@@ -213,6 +217,7 @@ struct MarkdownBlock: Identifiable {
         case callout(title: String, text: String)
         case code(language: String?, text: String)
         case diagram(language: String, text: String)
+        case whiteboard(String)
         case math(String)
         case table(MarkdownTable)
         case image(MarkdownImage)
@@ -324,6 +329,45 @@ private struct MarkdownHTMLMediaView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+private struct WhiteboardMarkdownWidgetView: View {
+    let source: String
+
+    private var document: WhiteboardDocument {
+        WhiteboardDocument.decode(from: source)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "scribble.variable")
+                    .foregroundStyle(.secondary)
+                Text("Whiteboard")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            if let data = WhiteboardExportService.pngData(document: document, size: CGSize(width: 960, height: 600)),
+               let image = NSImage(data: data) {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.white)
+            } else {
+                MarkdownCodeBlockView(language: "sldraw", value: source)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay {
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+        }
     }
 }
 
@@ -737,9 +781,15 @@ enum MarkdownPreviewParser {
                     index += 1
                 }
                 let code = codeLines.joined(separator: "\n")
-                if let language = fenceInfo.language,
-                   ["mermaid", "sequence", "flow"].contains(language.lowercased()) {
-                    blocks.append(MarkdownBlock(kind: .diagram(language: language, text: code)))
+                if let language = fenceInfo.language {
+                    let normalizedLanguage = language.lowercased()
+                    if ["mermaid", "sequence", "flow"].contains(normalizedLanguage) {
+                        blocks.append(MarkdownBlock(kind: .diagram(language: language, text: code)))
+                    } else if ["sldraw", "whiteboard", "simplelime-draw"].contains(normalizedLanguage) {
+                        blocks.append(MarkdownBlock(kind: .whiteboard(code)))
+                    } else {
+                        blocks.append(MarkdownBlock(kind: .code(language: fenceInfo.language, text: code)))
+                    }
                 } else {
                     blocks.append(MarkdownBlock(kind: .code(language: fenceInfo.language, text: code)))
                 }

@@ -3,6 +3,9 @@ import Foundation
 enum AIAgentProvider: String, CaseIterable, Codable, Identifiable {
     case copilot
     case codex
+    case openAICompatible
+    case anthropic
+    case gemini
 
     var id: String { rawValue }
 
@@ -10,6 +13,31 @@ enum AIAgentProvider: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .copilot: "Copilot"
         case .codex: "Codex"
+        case .openAICompatible: "HTTP LLM"
+        case .anthropic: "Anthropic"
+        case .gemini: "Gemini"
+        }
+    }
+
+    var usesACP: Bool {
+        switch self {
+        case .copilot, .codex:
+            true
+        case .openAICompatible, .anthropic, .gemini:
+            false
+        }
+    }
+
+    var httpProvider: HTTPAIProvider? {
+        switch self {
+        case .copilot, .codex:
+            nil
+        case .openAICompatible:
+            .openAICompatible
+        case .anthropic:
+            .anthropic
+        case .gemini:
+            .gemini
         }
     }
 
@@ -25,6 +53,8 @@ enum AIAgentProvider: String, CaseIterable, Codable, Identifiable {
                 return "/opt/homebrew/bin/codex-acp"
             }
             return "codex-acp"
+        case .openAICompatible, .anthropic, .gemini:
+            return ""
         }
     }
 
@@ -32,6 +62,7 @@ enum AIAgentProvider: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .copilot: "--acp --stdio"
         case .codex: ""
+        case .openAICompatible, .anthropic, .gemini: ""
         }
     }
 

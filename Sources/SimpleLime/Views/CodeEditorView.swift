@@ -2,6 +2,11 @@ import AppKit
 import STTextView
 import SwiftUI
 
+private struct FoldGutterMarker: Equatable {
+    var displayLineNumber: Int
+    var isFolded: Bool
+}
+
 struct CodeEditorView: NSViewRepresentable {
     @Binding var text: String
     @Binding var selectionRanges: [TextRange]
@@ -9,6 +14,10 @@ struct CodeEditorView: NSViewRepresentable {
     var language: EditorLanguage
     var fontSize: Double
     var wrapsLines: Bool
+    var columnGuide: Int
+    var foldedRanges: [StructuredFoldRange] = []
+    var syntaxHighlightingEnabled: Bool = true
+    var isEditable: Bool = true
     var focusModeEnabled: Bool
     var typewriterModeEnabled: Bool
     var comments: [DocumentComment] = []
@@ -16,13 +25,68 @@ struct CodeEditorView: NSViewRepresentable {
     var collaborators: [RemoteCollaborator] = []
     var onShortcut: (EditorShortcut) -> Void
     var onVisibleLineRangeChange: (ClosedRange<Int>) -> Void
+    var onToggleFoldAtLine: (Int) -> Void = { _ in }
     var onRegisterEditorCommandHandler: (@escaping (EditorCommand) -> Bool) -> Void
+
+    private var displayText: String {
+        StructuredTextFolder.foldedText(for: text, foldedRanges: foldedRanges)
+    }
+
+    private var foldGutterSignature: String {
+        let foldedSignature = foldedRanges
+            .map { "\($0.startLine):\($0.endLine)" }
+            .joined(separator: ",")
+        return "\(syntaxHighlightingEnabled)#\(language)#\(foldedSignature)"
+    }
+
+    private func foldGutterMarkers(sourceText: String, foldedRanges: [StructuredFoldRange]) -> [FoldGutterMarker] {
+        guard syntaxHighlightingEnabled,
+              language.supportsStructuredFoldGutter else { return [] }
+
+        let foldableRanges = StructuredTextFolder.foldableRanges(in: sourceText, language: language)
+        guard !foldableRanges.isEmpty else { return [] }
+
+        let foldedIDs = Set(foldedRanges.map(\.id))
+        var usedDisplayLines = Set<Int>()
+        return foldableRanges.compactMap { range in
+            let isHiddenInsideFold = foldedRanges.contains { foldedRange in
+                foldedRange.startLine < range.startLine && range.startLine <= foldedRange.endLine
+            }
+            guard !isHiddenInsideFold else { return nil }
+
+            let displayLine = StructuredTextFolder.displayLineNumber(
+                forSourceLine: range.startLine,
+                foldedRanges: foldedRanges
+            )
+            guard usedDisplayLines.insert(displayLine).inserted else { return nil }
+            return FoldGutterMarker(displayLineNumber: displayLine, isFolded: foldedIDs.contains(range.id))
+        }
+    }
+
+    private var decorationSignature: String {
+        let commentSignature = comments
+            .filter { !$0.isResolved }
+            .map { "\($0.id.uuidString):\($0.range.location):\($0.range.length):\($0.id == activeCommentID)" }
+            .joined(separator: "|")
+        let collaboratorSignature = collaborators
+            .map { collaborator in
+                let selections = collaborator.selectionRanges
+                    .map { "\($0.location):\($0.length)" }
+                    .joined(separator: ",")
+                return "\(collaborator.deviceID):\(collaborator.colorIndex):\(selections)"
+            }
+            .joined(separator: "|")
+        return "\(focusModeEnabled)#\(commentSignature)#\(collaboratorSignature)"
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
+        let telemetry = EditorPerformanceTelemetry.begin("EditorInitialRender")
+        defer { EditorPerformanceTelemetry.end("EditorInitialRender", telemetry) }
+
         let scrollView = EditorTextView.scrollableTextView()
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
@@ -40,7 +104,7 @@ struct CodeEditorView: NSViewRepresentable {
             context.coordinator.parent.onShortcut(shortcut)
             return true
         }
-        textView.isEditable = true
+        textView.isEditable = isEditable && foldedRanges.isEmpty
         textView.isSelectable = true
         textView.allowsUndo = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -48,8 +112,10 @@ struct CodeEditorView: NSViewRepresentable {
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.isContinuousSpellCheckingEnabled = false
         textView.isGrammarCheckingEnabled = false
-        textView.text = text
+        textView.text = displayText
         textView.currentLanguage = language
+        textView.structuredFoldDisplayActive = !foldedRanges.isEmpty
+        textView.syntaxHighlightingEnabled = syntaxHighlightingEnabled
         textView.focusModeEnabled = focusModeEnabled
         textView.typewriterModeEnabled = typewriterModeEnabled
 
@@ -59,9 +125,13 @@ struct CodeEditorView: NSViewRepresentable {
             in: scrollView,
             wrapsLines: wrapsLines,
             fontSize: CGFloat(fontSize),
+            columnGuide: columnGuide,
             typewriterModeEnabled: typewriterModeEnabled
         )
+        configureFoldGutter(for: textView, sourceText: text)
+        context.coordinator.markFoldGutterApplied(signature: foldGutterSignature)
         applySyntaxHighlighting(to: textView, language: language, fontSize: CGFloat(fontSize))
+        context.coordinator.markRenderingApplied(decorationSignature: decorationSignature)
         applySelection(selectionRanges, to: textView)
         context.coordinator.observeVisibleRange(in: scrollView, textView: textView)
         context.coordinator.publishVisibleLineRange(from: textView)
@@ -70,6 +140,9 @@ struct CodeEditorView: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        let telemetry = EditorPerformanceTelemetry.begin("EditorUpdateRender")
+        defer { EditorPerformanceTelemetry.end("EditorUpdateRender", telemetry) }
+
         guard let textView = scrollView.documentView as? EditorTextView else { return }
 
         context.coordinator.parent = self
@@ -78,21 +151,36 @@ struct CodeEditorView: NSViewRepresentable {
             context.coordinator.isApplyingExternalUpdate = false
         }
 
-        if textView.text != text {
-            textView.text = text
+        let displayText = displayText
+        let foldDisplayActive = !foldedRanges.isEmpty
+        if textView.text != displayText {
+            textView.text = displayText
+            textView.needsSyntaxHighlight = true
+            context.coordinator.scheduleFoldGutterRefresh(for: textView)
+        }
+        if textView.structuredFoldDisplayActive != foldDisplayActive {
+            textView.structuredFoldDisplayActive = foldDisplayActive
             textView.needsSyntaxHighlight = true
         }
+        textView.isEditable = isEditable && !foldDisplayActive
 
         textView.shortcutHandler = { shortcut in
             context.coordinator.parent.onShortcut(shortcut)
             return true
         }
-        if textView.currentLanguage != language ||
+        let renderingConfigurationChanged = textView.currentLanguage != language ||
+            textView.syntaxHighlightingEnabled != syntaxHighlightingEnabled
+        if renderingConfigurationChanged {
+            context.coordinator.cancelPendingSyntaxHighlight()
+            context.coordinator.cancelPendingFoldGutterRefresh()
+        }
+        if renderingConfigurationChanged ||
             textView.focusModeEnabled != focusModeEnabled {
             textView.needsSyntaxHighlight = true
         }
         let shouldCenterForTypewriter = !textView.typewriterModeEnabled && typewriterModeEnabled
         textView.currentLanguage = language
+        textView.syntaxHighlightingEnabled = syntaxHighlightingEnabled
         textView.focusModeEnabled = focusModeEnabled
         textView.typewriterModeEnabled = typewriterModeEnabled
         registerCommandHandler(for: textView)
@@ -101,9 +189,18 @@ struct CodeEditorView: NSViewRepresentable {
             in: scrollView,
             wrapsLines: wrapsLines,
             fontSize: CGFloat(fontSize),
+            columnGuide: columnGuide,
             typewriterModeEnabled: typewriterModeEnabled
         )
-        applySyntaxHighlighting(to: textView, language: language, fontSize: CGFloat(fontSize))
+        if context.coordinator.needsFoldGutterRefresh(signature: foldGutterSignature) {
+            context.coordinator.cancelPendingFoldGutterRefresh()
+            configureFoldGutter(for: textView, sourceText: text)
+            context.coordinator.markFoldGutterApplied(signature: foldGutterSignature)
+        }
+        if shouldRefreshRendering(textView: textView, context: context) {
+            applySyntaxHighlighting(to: textView, language: language, fontSize: CGFloat(fontSize))
+            context.coordinator.markRenderingApplied(decorationSignature: decorationSignature)
+        }
         applySelection(selectionRanges, to: textView)
         context.coordinator.observeVisibleRange(in: scrollView, textView: textView)
         context.coordinator.publishVisibleLineRange(from: textView)
@@ -118,6 +215,7 @@ struct CodeEditorView: NSViewRepresentable {
         in scrollView: NSScrollView,
         wrapsLines: Bool,
         fontSize: CGFloat,
+        columnGuide: Int,
         typewriterModeEnabled: Bool
     ) {
         let baseFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
@@ -146,6 +244,7 @@ struct CodeEditorView: NSViewRepresentable {
         textView.selectedLineHighlightColor = lineHighlightColor
         textView.textContainer.lineFragmentPadding = 14
         textView.configuredWrapsLines = wrapsLines
+        textView.columnGuide = columnGuide
 
         if textView.configuredFontSize != fontSize {
             textView.configuredFontSize = fontSize
@@ -163,6 +262,19 @@ struct CodeEditorView: NSViewRepresentable {
         textView.needsDisplay = true
     }
 
+    private func configureFoldGutter(for textView: EditorTextView, sourceText: String) {
+        EditorPerformanceTelemetry.measure("EditorFoldGutter") {
+            let foldedRanges = foldedRanges
+            textView.configureFoldGutter(markers: foldGutterMarkers(sourceText: sourceText, foldedRanges: foldedRanges)) { displayLine in
+                let sourceLine = StructuredTextFolder.sourceLineNumber(
+                    forDisplayLine: displayLine,
+                    foldedRanges: foldedRanges
+                )
+                onToggleFoldAtLine(sourceLine)
+            }
+        }
+    }
+
     private func applySelection(_ ranges: [TextRange], to textView: EditorTextView) {
         let normalized = textView.normalizedRanges((ranges.isEmpty ? [.zero] : ranges).map(\.nsRange))
         let targetRanges = normalized.isEmpty ? [NSRange(location: 0, length: 0)] : normalized
@@ -177,7 +289,40 @@ struct CodeEditorView: NSViewRepresentable {
         }
     }
 
+    private func shouldRefreshRendering(textView: EditorTextView, context: Context) -> Bool {
+        textView.needsSyntaxHighlight ||
+            textView.highlightedLanguage != language ||
+            textView.highlightedFontSize != CGFloat(fontSize) ||
+            context.coordinator.needsRenderingRefresh(decorationSignature: decorationSignature)
+    }
+
     private func applySyntaxHighlighting(to textView: EditorTextView, language: EditorLanguage, fontSize: CGFloat) {
+        let telemetry = EditorPerformanceTelemetry.begin("EditorSyntaxHighlight")
+        defer { EditorPerformanceTelemetry.end("EditorSyntaxHighlight", telemetry) }
+
+        guard textView.syntaxHighlightingEnabled else {
+            if textView.needsSyntaxHighlight ||
+                textView.highlightedFontSize != fontSize ||
+                textView.highlightedLanguage != .plain {
+                let selectionRanges = textView.editorSelectionRanges
+                SyntaxHighlighter.applyBaseFormatting(to: textView, fontSize: fontSize)
+                textView.needsSyntaxHighlight = false
+                textView.highlightedLanguage = .plain
+                textView.highlightedFontSize = fontSize
+
+                if selectionRanges.count > 1, textView.editorSelectionRanges != selectionRanges {
+                    textView.setEditorSelectionRanges(selectionRanges)
+                }
+            }
+
+            if !textView.structuredFoldDisplayActive {
+                applyCommentHighlights(to: textView)
+                applyCollaboratorHighlights(to: textView)
+            }
+            textView.updateFocusModeDimming()
+            return
+        }
+
         let shouldApplySyntax = textView.needsSyntaxHighlight ||
             textView.highlightedLanguage != language ||
             textView.highlightedFontSize != fontSize
@@ -194,8 +339,10 @@ struct CodeEditorView: NSViewRepresentable {
             }
         }
 
-        applyCommentHighlights(to: textView)
-        applyCollaboratorHighlights(to: textView)
+        if !textView.structuredFoldDisplayActive {
+            applyCommentHighlights(to: textView)
+            applyCollaboratorHighlights(to: textView)
+        }
         textView.updateFocusModeDimming()
     }
 
@@ -251,6 +398,10 @@ struct CodeEditorView: NSViewRepresentable {
         var isApplyingExternalUpdate = false
         private weak var observedTextView: EditorTextView?
         private weak var observedContentView: NSClipView?
+        private var syntaxHighlightTask: Task<Void, Never>?
+        private var foldGutterTask: Task<Void, Never>?
+        private var lastDecorationSignature: String?
+        private var lastFoldGutterSignature: String?
         private var lastVisibleLineRange: ClosedRange<Int>?
 
         init(_ parent: CodeEditorView) {
@@ -258,6 +409,8 @@ struct CodeEditorView: NSViewRepresentable {
         }
 
         deinit {
+            syntaxHighlightTask?.cancel()
+            foldGutterTask?.cancel()
             if let observedContentView {
                 NotificationCenter.default.removeObserver(
                     self,
@@ -299,6 +452,32 @@ struct CodeEditorView: NSViewRepresentable {
             }
         }
 
+        func needsRenderingRefresh(decorationSignature: String) -> Bool {
+            lastDecorationSignature != decorationSignature
+        }
+
+        func markRenderingApplied(decorationSignature: String) {
+            lastDecorationSignature = decorationSignature
+        }
+
+        func needsFoldGutterRefresh(signature: String) -> Bool {
+            lastFoldGutterSignature != signature
+        }
+
+        func markFoldGutterApplied(signature: String) {
+            lastFoldGutterSignature = signature
+        }
+
+        func cancelPendingSyntaxHighlight() {
+            syntaxHighlightTask?.cancel()
+            syntaxHighlightTask = nil
+        }
+
+        func cancelPendingFoldGutterRefresh() {
+            foldGutterTask?.cancel()
+            foldGutterTask = nil
+        }
+
         @objc private func visibleBoundsDidChange(_ notification: Notification) {
             guard let observedTextView else { return }
             publishVisibleLineRange(from: observedTextView)
@@ -306,16 +485,21 @@ struct CodeEditorView: NSViewRepresentable {
 
         func textViewDidChangeText(_ notification: Notification) {
             guard !isApplyingExternalUpdate,
-                  let textView = notification.object as? EditorTextView else {
+                  parent.isEditable,
+                  let textView = notification.object as? EditorTextView,
+                  !textView.structuredFoldDisplayActive else {
                 return
             }
 
-            parent.text = textView.text ?? ""
-            parent.selectionRanges = textView.editorSelectionRanges.map(TextRange.init)
-            textView.needsSyntaxHighlight = true
-            parent.applySyntaxHighlighting(to: textView, language: parent.language, fontSize: CGFloat(parent.fontSize))
-            textView.centerSelectionForTypewriterModeIfNeeded()
-            publishVisibleLineRange(from: textView)
+            EditorPerformanceTelemetry.measure("EditorTextChange") {
+                parent.text = textView.text ?? ""
+                parent.selectionRanges = textView.editorSelectionRanges.map(TextRange.init)
+                textView.invalidateLineMetricsCache()
+                scheduleSyntaxHighlight(for: textView)
+                scheduleFoldGutterRefresh(for: textView)
+                textView.centerSelectionForTypewriterModeIfNeeded()
+                publishVisibleLineRange(from: textView)
+            }
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
@@ -324,11 +508,129 @@ struct CodeEditorView: NSViewRepresentable {
                 return
             }
 
-            parent.selectionRanges = textView.editorSelectionRanges.map(TextRange.init)
-            textView.updateFocusModeDimming()
-            textView.centerSelectionForTypewriterModeIfNeeded()
-            publishVisibleLineRange(from: textView)
+            EditorPerformanceTelemetry.measure("EditorSelectionChange") {
+                parent.selectionRanges = textView.editorSelectionRanges.map(TextRange.init)
+                textView.scrollActiveSelectionIntoViewIfNeeded()
+                textView.updateFocusModeDimming()
+                textView.centerSelectionForTypewriterModeIfNeeded()
+                publishVisibleLineRange(from: textView)
+            }
         }
+
+        private func scheduleSyntaxHighlight(for textView: EditorTextView) {
+            syntaxHighlightTask?.cancel()
+
+            guard parent.syntaxHighlightingEnabled,
+                  parent.language.needsDebouncedSyntaxHighlighting else {
+                return
+            }
+
+            let language = parent.language
+            let fontSize = CGFloat(parent.fontSize)
+            let decorationSignature = parent.decorationSignature
+
+            syntaxHighlightTask = Task { @MainActor [weak self, weak textView] in
+                do {
+                    try await Task.sleep(nanoseconds: 140_000_000)
+                } catch {
+                    return
+                }
+
+                guard !Task.isCancelled,
+                      let self,
+                      let textView,
+                      !self.isApplyingExternalUpdate else {
+                    return
+                }
+
+                textView.needsSyntaxHighlight = true
+                self.parent.applySyntaxHighlighting(to: textView, language: language, fontSize: fontSize)
+                self.markRenderingApplied(decorationSignature: decorationSignature)
+            }
+        }
+
+        func scheduleFoldGutterRefresh(for textView: EditorTextView) {
+            foldGutterTask?.cancel()
+
+            guard parent.syntaxHighlightingEnabled,
+                  parent.language.supportsStructuredFoldGutter else {
+                return
+            }
+
+            let signature = parent.foldGutterSignature
+
+            foldGutterTask = Task { @MainActor [weak self, weak textView] in
+                do {
+                    try await Task.sleep(nanoseconds: 220_000_000)
+                } catch {
+                    return
+                }
+
+                guard !Task.isCancelled,
+                      let self,
+                      let textView,
+                      !self.isApplyingExternalUpdate,
+                      self.parent.foldGutterSignature == signature else {
+                    return
+                }
+
+                self.parent.configureFoldGutter(for: textView, sourceText: textView.text ?? "")
+                self.markFoldGutterApplied(signature: signature)
+            }
+        }
+    }
+}
+
+private final class FoldGutterMarkerView: NSView {
+    var isFolded: Bool {
+        didSet {
+            needsDisplay = true
+            toolTip = isFolded ? "Unfold block" : "Fold block"
+        }
+    }
+
+    init(isFolded: Bool) {
+        self.isFolded = isFolded
+        super.init(frame: .zero)
+        wantsLayer = true
+        toolTip = isFolded ? "Unfold block" : "Fold block"
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var isFlipped: Bool {
+        true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        let side: CGFloat = min(8, max(5, bounds.height * 0.48))
+        let center = NSPoint(x: min(bounds.maxX - 7, 11), y: bounds.midY)
+        let path = NSBezierPath()
+
+        if isFolded {
+            path.move(to: NSPoint(x: center.x - side * 0.32, y: center.y - side * 0.50))
+            path.line(to: NSPoint(x: center.x - side * 0.32, y: center.y + side * 0.50))
+            path.line(to: NSPoint(x: center.x + side * 0.38, y: center.y))
+        } else {
+            path.move(to: NSPoint(x: center.x - side * 0.52, y: center.y - side * 0.25))
+            path.line(to: NSPoint(x: center.x + side * 0.52, y: center.y - side * 0.25))
+            path.line(to: NSPoint(x: center.x, y: center.y + side * 0.45))
+        }
+        path.close()
+
+        NSColor.controlAccentColor.withAlphaComponent(isFolded ? 0.90 : 0.55).setFill()
+        path.fill()
+    }
+}
+
+private extension NSView {
+    var descendantViews: [NSView] {
+        subviews + subviews.flatMap(\.descendantViews)
     }
 }
 
@@ -340,10 +642,37 @@ final class EditorTextView: STTextView {
     var configuredWrapsLines: Bool?
     var configuredFontSize: CGFloat?
     var currentLanguage: EditorLanguage = .plain
+    var structuredFoldDisplayActive = false
+    var syntaxHighlightingEnabled = true
     var focusModeEnabled = false
     var typewriterModeEnabled = false
+    var columnGuide = 0 {
+        didSet {
+            if columnGuide != oldValue {
+                needsDisplay = true
+            }
+        }
+    }
 
+    private var foldMarkerDisplayLines = Set<Int>()
+    private var foldGutterClickRecognizer: NSClickGestureRecognizer?
+    private weak var foldGutterRecognizerView: NSView?
+    private var foldGutterToggleHandler: ((Int) -> Void)?
     private var columnDragState: ColumnDragState?
+    private var cachedLineRanges: [NSRange]?
+    private var focusDimmingSignature: String?
+    private(set) var lineMetricCacheBuildCount = 0
+
+    override var text: String? {
+        get {
+            super.text
+        }
+        set {
+            super.text = newValue
+            invalidateLineMetricsCache()
+            focusDimmingSignature = nil
+        }
+    }
 
     var editorSelectionRanges: [NSRange] {
         textLayoutManager.textSelections
@@ -420,25 +749,121 @@ final class EditorTextView: STTextView {
         }
     }
 
+    fileprivate func configureFoldGutter(markers: [FoldGutterMarker], onToggle: @escaping (Int) -> Void) {
+        foldGutterToggleHandler = onToggle
+
+        guard let gutterView else {
+            foldMarkerDisplayLines.removeAll()
+            return
+        }
+
+        gutterView.areMarkersEnabled = false
+        installFoldGutterRecognizer(on: gutterView)
+
+        let markerLines = Set(markers.map(\.displayLineNumber))
+        for staleLine in foldMarkerDisplayLines.subtracting(markerLines) {
+            gutterView.removeMarker(lineNumber: staleLine)
+        }
+
+        for marker in markers {
+            if let existing = gutterView.marker(lineNumber: marker.displayLineNumber),
+               let markerView = existing.view as? FoldGutterMarkerView {
+                markerView.isFolded = marker.isFolded
+            } else {
+                if gutterView.marker(lineNumber: marker.displayLineNumber) != nil {
+                    gutterView.removeMarker(lineNumber: marker.displayLineNumber)
+                }
+                gutterView.addMarker(
+                    STGutterMarker(
+                        lineNumber: marker.displayLineNumber,
+                        view: FoldGutterMarkerView(isFolded: marker.isFolded)
+                    )
+                )
+            }
+        }
+
+        foldMarkerDisplayLines = markerLines
+        gutterView.needsLayout = true
+        gutterView.needsDisplay = true
+    }
+
+    private func installFoldGutterRecognizer(on gutterView: NSView) {
+        guard foldGutterRecognizerView !== gutterView else { return }
+
+        if let previousRecognizer = foldGutterClickRecognizer, let previousView = foldGutterRecognizerView {
+            previousView.removeGestureRecognizer(previousRecognizer)
+        }
+
+        let recognizer = NSClickGestureRecognizer(target: self, action: #selector(handleFoldGutterClick(_:)))
+        recognizer.numberOfClicksRequired = 1
+        recognizer.buttonMask = 0x1
+        gutterView.addGestureRecognizer(recognizer)
+        foldGutterClickRecognizer = recognizer
+        foldGutterRecognizerView = gutterView
+    }
+
+    @objc private func handleFoldGutterClick(_ recognizer: NSClickGestureRecognizer) {
+        guard recognizer.state == .ended,
+              let gutterView = recognizer.view,
+              let displayLine = foldGutterLineNumber(at: recognizer.location(in: gutterView), in: gutterView) else {
+            return
+        }
+
+        foldGutterToggleHandler?(displayLine)
+    }
+
+    private func foldGutterLineNumber(at point: NSPoint, in gutterView: NSView) -> Int? {
+        if let lineCell = gutterView.descendantViews.first(where: { view in
+            String(describing: type(of: view)).contains("STGutterLineNumberCell") &&
+                view.bounds.insetBy(dx: -8, dy: -3).contains(view.convert(point, from: gutterView))
+        }) {
+            return lineNumber(fromGutterCell: lineCell)
+        }
+
+        let visibleRange = visibleSourceLineRange()
+        let lineHeight = max(1, ceil(font.ascender - font.descender + font.leading))
+        let offset = max(0, Int((point.y / lineHeight).rounded(.down)))
+        return min(visibleRange.upperBound, visibleRange.lowerBound + offset)
+    }
+
+    private func lineNumber(fromGutterCell view: NSView) -> Int? {
+        for child in Mirror(reflecting: view).children where child.label == "lineNumber" {
+            return child.value as? Int
+        }
+
+        guard let range = view.debugDescription.range(of: #"\(number: ([0-9]+)\)"#, options: .regularExpression) else {
+            return nil
+        }
+
+        return Int(
+            view.debugDescription[range]
+                .filter(\.isNumber)
+        )
+    }
+
     func visibleSourceLineRange() -> ClosedRange<Int> {
         let nsText = editorNSString
         let ranges = lineRanges
         guard nsText.length > 0 else { return 1...1 }
 
         let visibleRect = self.visibleRect
-        guard visibleRect.height > 0 else {
+        guard visibleRect.minY.isFinite,
+              visibleRect.height.isFinite,
+              visibleRect.height > 0 else {
             let line = (lineInfo(for: editorSelectionRanges.last?.location ?? 0)?.index ?? 0) + 1
             return line...line
         }
 
         let baseLineHeight: CGFloat = ceil(font.ascender - font.descender + font.leading)
         let lineHeight: CGFloat = Swift.max(1, baseLineHeight)
-        let textTop: CGFloat = Swift.max(0, visibleRect.minY)
+        let maxVisibleY = CGFloat(ranges.count) * lineHeight
+        let textTop: CGFloat = Swift.min(Swift.max(0, visibleRect.minY), maxVisibleY)
         let startLine = Swift.min(
             Swift.max(1, Int((textTop / lineHeight).rounded(.down)) + 1),
             ranges.count
         )
-        let visibleLineCount = Swift.max(1, Int((visibleRect.height / lineHeight).rounded(.up)) + 1)
+        let visibleLines = Swift.min((visibleRect.height / lineHeight).rounded(.up), CGFloat(ranges.count))
+        let visibleLineCount = Swift.max(1, Int(visibleLines) + 1)
         let endLine = Swift.min(ranges.count, startLine + visibleLineCount - 1)
 
         return min(startLine, endLine)...max(startLine, endLine)
@@ -475,6 +900,8 @@ final class EditorTextView: STTextView {
             shortcut = .toggleFocusMode
         case 17 where flags.contains(.option) && !flags.contains(.shift):
             shortcut = .toggleTypewriterMode
+        case 38 where flags.contains(.shift):
+            shortcut = .toggleTerminal
         case 34 where flags.contains(.shift):
             shortcut = .toggleAI
         case 3 where flags.contains(.shift):
@@ -545,6 +972,9 @@ final class EditorTextView: STTextView {
     }
 
     override func keyDown(with event: NSEvent) {
+        let telemetry = EditorPerformanceTelemetry.begin("EditorKeyDown")
+        defer { EditorPerformanceTelemetry.end("EditorKeyDown", telemetry) }
+
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
         if flags.contains(.command), flags.contains(.option), !flags.contains(.control) {
@@ -580,7 +1010,42 @@ final class EditorTextView: STTextView {
             return
         }
 
+        if event.keyCode == 48, !flags.contains(.command), !flags.contains(.control), !flags.contains(.option) {
+            if flags.contains(.shift) {
+                if outdentSelectedLines() { return }
+            } else if currentLanguage == .markdown,
+                      EditorTypingRules.containsMarkdownListLine(text: editorNSString, ranges: editorSelectionRanges),
+                      indentSelectedLines() {
+                return
+            }
+        }
+
         super.keyDown(with: event)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        drawColumnGuideIfNeeded()
+    }
+
+    private func drawColumnGuideIfNeeded() {
+        guard columnGuide > 0 else { return }
+
+        let characterWidth = ("0" as NSString).size(withAttributes: [.font: font]).width
+        guard characterWidth > 0 else { return }
+
+        let x = (gutterView?.frame.width ?? 0) +
+            textContainer.lineFragmentPadding +
+            CGFloat(columnGuide) * characterWidth
+        let visible = visibleRect
+        guard x >= visible.minX - 1, x <= visible.maxX + 1 else { return }
+
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: x, y: visible.minY))
+        path.line(to: NSPoint(x: x, y: visible.maxY))
+        path.lineWidth = 1 / max(1, window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2)
+        NSColor.separatorColor.withAlphaComponent(0.70).setStroke()
+        path.stroke()
     }
 
     override func insertText(_ insertString: Any) {
@@ -639,12 +1104,43 @@ final class EditorTextView: STTextView {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard isColumnCursorMouseModifier(flags),
               let anchorLocation = characterLocation(for: event) else {
+            if placeCaretForEmptyEditorClickIfNeeded(event, flags: flags) {
+                return
+            }
+
             super.mouseDown(with: event)
             return
         }
 
         window?.makeFirstResponder(self)
         trackColumnSelection(from: event, anchorLocation: anchorLocation)
+    }
+
+    private func placeCaretForEmptyEditorClickIfNeeded(_ event: NSEvent, flags: NSEvent.ModifierFlags) -> Bool {
+        guard event.type == .leftMouseDown,
+              event.clickCount == 1,
+              flags.intersection([.shift, .control, .option, .command]).isEmpty,
+              isSelectable else {
+            return false
+        }
+
+        guard let window else { return false }
+
+        let screenPoint = window.convertPoint(toScreen: event.locationInWindow)
+        guard characterIndex(for: screenPoint) == NSNotFound else {
+            return false
+        }
+
+        let point = convert(event.locationInWindow, from: nil)
+        let gutterWidth = gutterView?.frame.width ?? 0
+        guard point.x >= gutterWidth else {
+            return false
+        }
+
+        window.makeFirstResponder(self)
+        let location = emptyAreaCaretLocation(forDocumentPoint: point)
+        setEditorSelectionRanges([NSRange(location: location, length: 0)])
+        return true
     }
 
     func performEditorCommand(_ command: EditorCommand) -> Bool {
@@ -712,6 +1208,10 @@ final class EditorTextView: STTextView {
                     .filter { !$0.isEmpty }
                     .joined(separator: " ")
             }
+        case .formatJSON, .minifyJSON:
+            return false
+        case .formatMarkdownTables:
+            return replaceTargetLines { MarkdownTableFormatter.format($0) }
         }
     }
 
@@ -1158,9 +1658,9 @@ final class EditorTextView: STTextView {
         switch currentLanguage {
         case .swift, .javascript, .typescript, .go, .rust:
             return "//"
-        case .python, .ruby, .shell:
+        case .python, .ruby, .shell, .yaml:
             return "#"
-        case .plain, .markdown, .json, .html, .css:
+        case .plain, .markdown, .json, .html, .css, .csv, .tsv, .image, .pdf, .hex, .drawing:
             return nil
         }
     }
@@ -1269,6 +1769,16 @@ final class EditorTextView: STTextView {
 
         guard let pair = smartPair(for: replacement) else {
             return false
+        }
+
+        if replacement == "\"" || replacement == "'" {
+            let nsText = editorNSString
+            let targetRanges = rangesForEditing(replacementRange: replacementRange)
+            guard targetRanges.allSatisfy({
+                EditorTypingRules.shouldAutoCloseQuote(replacement, text: nsText, range: normalizedRange($0))
+            }) else {
+                return false
+            }
         }
 
         return insertSmartPair(pair, replacementRange: replacementRange)
@@ -1573,9 +2083,16 @@ final class EditorTextView: STTextView {
     }
 
     private var lineRanges: [NSRange] {
+        if let cachedLineRanges {
+            return cachedLineRanges
+        }
+
         let nsText = editorNSString
+        lineMetricCacheBuildCount += 1
         guard nsText.length > 0 else {
-            return [NSRange(location: 0, length: 0)]
+            let ranges = [NSRange(location: 0, length: 0)]
+            cachedLineRanges = ranges
+            return ranges
         }
 
         var ranges: [NSRange] = []
@@ -1592,7 +2109,12 @@ final class EditorTextView: STTextView {
             ranges.append(NSRange(location: nsText.length, length: 0))
         }
 
+        cachedLineRanges = ranges
         return ranges
+    }
+
+    func invalidateLineMetricsCache() {
+        cachedLineRanges = nil
     }
 
     private func lineInfo(for location: Int) -> LineInfo? {
@@ -1621,6 +2143,19 @@ final class EditorTextView: STTextView {
         let lineRange = ranges[lineIndex]
         let contentLength = contentLength(for: lineRange)
         return lineRange.location + min(max(0, column), contentLength)
+    }
+
+    func emptyAreaCaretLocation(forDocumentPoint point: NSPoint) -> Int {
+        let ranges = lineRanges
+        guard !ranges.isEmpty else { return 0 }
+
+        let lineHeight = max(1, ceil(font.ascender - font.descender + font.leading))
+        let lineIndex = min(
+            max(0, Int((point.y / lineHeight).rounded(.down))),
+            ranges.count - 1
+        )
+        let lineRange = ranges[lineIndex]
+        return lineRange.location + contentLength(for: lineRange)
     }
 
     private func contentLength(for lineRange: NSRange) -> Int {
@@ -1724,25 +2259,70 @@ final class EditorTextView: STTextView {
         return hasTrailingNewline ? "\(output)\n" : output
     }
 
-    func updateFocusModeDimming() {
+    @discardableResult
+    func updateFocusModeDimming() -> Bool {
         let nsText = editorNSString
         let fullRange = NSRange(location: 0, length: nsText.length)
-        guard fullRange.length > 0 else { return }
+        guard fullRange.length > 0 else {
+            let hadDimming = focusDimmingSignature != nil
+            focusDimmingSignature = nil
+            return hadDimming
+        }
+
+        guard focusModeEnabled else {
+            guard focusDimmingSignature != nil else {
+                return false
+            }
+            removeRenderingAttribute(.foregroundColor, range: fullRange)
+            focusDimmingSignature = nil
+            needsDisplay = true
+            return true
+        }
+
+        let activeRange = focusedBlockRange()
+        let signature = "\(fullRange.length):\(activeRange.location):\(activeRange.length)"
+        guard focusDimmingSignature != signature else {
+            return false
+        }
 
         removeRenderingAttribute(.foregroundColor, range: fullRange)
-        guard focusModeEnabled else {
-            needsDisplay = true
-            return
-        }
 
         addRenderingAttributes(
             [.foregroundColor: NSColor.labelColor.withAlphaComponent(0.24)],
             range: fullRange
         )
 
-        let activeRange = focusedBlockRange()
-        addRenderingAttributes([.foregroundColor: NSColor.labelColor], range: activeRange)
+        removeRenderingAttribute(.foregroundColor, range: activeRange)
+        focusDimmingSignature = signature
         needsDisplay = true
+        return true
+    }
+
+    func scrollActiveSelectionIntoViewIfNeeded() {
+        guard let scrollView = enclosingScrollView,
+              let window,
+              let selection = editorSelectionRanges.last else {
+            return
+        }
+
+        let nsText = editorNSString
+        let location = min(max(0, selection.location + selection.length), nsText.length)
+        let caretRange = NSRange(location: location, length: 0)
+        let screenRect = firstRect(forCharacterRange: caretRange, actualRange: nil)
+
+        guard !screenRect.isEmpty, !screenRect.isNull, !screenRect.isInfinite else {
+            scrollRangeToVisible(caretRange)
+            return
+        }
+
+        let windowOrigin = window.convertPoint(fromScreen: screenRect.origin)
+        let localOrigin = convert(windowOrigin, from: nil)
+        let localRect = NSRect(origin: localOrigin, size: screenRect.size)
+        let visibleRect = scrollView.contentView.documentVisibleRect.insetBy(dx: 0, dy: 18)
+
+        if localRect.minY < visibleRect.minY || localRect.maxY > visibleRect.maxY {
+            scrollRangeToVisible(caretRange)
+        }
     }
 
     func centerSelectionForTypewriterModeIfNeeded(immediate: Bool = false) {

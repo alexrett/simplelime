@@ -11,13 +11,13 @@ final class EditorMiniMapLayoutTests: XCTestCase {
         XCTAssertEqual(layout.lineNumber(at: 900), 1_000)
     }
 
-    func testLineHitTestingKeepsShortDocumentsCentered() {
+    func testLineHitTestingKeepsShortDocumentsTopAligned() {
         let layout = EditorMiniMapLayout(lineCount: 3, height: 100)
 
         XCTAssertEqual(layout.rowHeight, 4)
-        XCTAssertEqual(layout.top, 44)
+        XCTAssertEqual(layout.top, 0)
         XCTAssertEqual(layout.lineNumber(at: 0), 1)
-        XCTAssertEqual(layout.lineNumber(at: 48), 2)
+        XCTAssertEqual(layout.lineNumber(at: 4), 2)
         XCTAssertEqual(layout.lineNumber(at: 99), 3)
     }
 

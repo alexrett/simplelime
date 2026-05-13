@@ -62,6 +62,41 @@ final class EditorStoreTextTransformTests: XCTestCase {
         XCTAssertEqual(store.selectedBuffer?.selectionRanges, [SLTextRange(location: 8, length: 4)])
     }
 
+    func testJSONFormatAndMinifyFallbacks() {
+        let formatted = transformedText("{\"one\":1,\"two\":[true]}", using: .formatJSON)
+        XCTAssertTrue(formatted.contains("\"one\" : 1"), formatted)
+        XCTAssertTrue(formatted.contains("\"two\" : ["), formatted)
+        XCTAssertTrue(formatted.hasSuffix("\n"))
+
+        XCTAssertEqual(
+            transformedText("{\n  \"one\" : 1,\n  \"two\" : [\n    true\n  ]\n}\n", using: .minifyJSON),
+            "{\"one\":1,\"two\":[true]}"
+        )
+    }
+
+    func testInvalidJSONTransformLeavesTextUntouchedAndReportsError() {
+        let store = makeStore(text: "{invalid", selection: nil)
+
+        store.performTextTransform(.formatJSON)
+
+        XCTAssertEqual(store.selectedBuffer?.text, "{invalid")
+        XCTAssertEqual(store.lastError?.hasPrefix("Could not format JSON:"), true)
+    }
+
+    func testMarkdownTableTransformFormatsSelectedTable() {
+        let store = makeStore(
+            text: "intro\n|a|bb|\n|---|---:|\n|x|12|\noutro",
+            selection: SLTextRange(location: 6, length: 25)
+        )
+
+        store.performTextTransform(.formatMarkdownTables)
+
+        XCTAssertEqual(
+            store.selectedBuffer?.text,
+            "intro\n| a   |  bb |\n| --- | --: |\n| x   |  12 |\noutro"
+        )
+    }
+
     private func transformedText(_ text: String, selection: SLTextRange? = nil, using transform: TextTransform) -> String {
         let store = makeStore(text: text, selection: selection)
         store.performTextTransform(transform)

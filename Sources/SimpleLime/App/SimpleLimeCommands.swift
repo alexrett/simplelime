@@ -7,6 +7,22 @@ struct SimpleLimeCommands: Commands {
         workspace.activeStore
     }
 
+    private var previewCommandTitle: String {
+        guard let store else {
+            return "Show Preview"
+        }
+
+        if store.isPreviewVisible {
+            return "Hide Preview"
+        }
+
+        if store.selectedBuffer?.language.isDelimitedTable == true {
+            return "Show Table Preview"
+        }
+
+        return "Show Markdown Preview"
+    }
+
     var body: some Commands {
         CommandGroup(replacing: .appInfo) {
             Button("About SimpleLime") {
@@ -20,6 +36,10 @@ struct SimpleLimeCommands: Commands {
             }
             .keyboardShortcut("n", modifiers: [.command])
 
+            Button("New Drawing Board") {
+                store?.newDrawingBoard()
+            }
+
             Button("New Window") {
                 workspace.newWindow()
             }
@@ -29,6 +49,10 @@ struct SimpleLimeCommands: Commands {
                 store?.openFiles()
             }
             .keyboardShortcut("o", modifiers: [.command])
+
+            Button("Open Encrypted File...") {
+                store?.openEncryptedFileWithPrompt()
+            }
 
             Button("Open Folder...") {
                 store?.openFolder()
@@ -44,6 +68,14 @@ struct SimpleLimeCommands: Commands {
 
             Button("Open Copy in New Window") {
                 workspace.openSelectedTabCopyInNewWindow(from: store)
+            }
+
+            Button("Compare With Previous Tab") {
+                store?.compareSelectedBufferWithPreviousTab()
+            }
+
+            Button("Compare With File...") {
+                store?.compareSelectedBufferWithFile()
             }
 
             Divider()
@@ -65,12 +97,147 @@ struct SimpleLimeCommands: Commands {
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
 
+            Button("Save Chunk Back to Source") {
+                store?.saveSelectedLargeFileChunkBackToSource()
+            }
+            .disabled(!(store?.selectedBufferCanSaveLargeFileChunkBack ?? false))
+
+            Button("Edit Large-File Chunk") {
+                store?.enableSelectedLargeFileChunkEditing()
+            }
+            .disabled(!(store?.selectedLargeFileCanEnableChunkEditing ?? false))
+
+            Button("Replace Large-File Line...") {
+                store?.replaceSelectedLargeFileLineWithPrompt()
+            }
+            .disabled(!(store?.selectedLargeFileCanReplaceLine ?? false))
+
+            Button("Insert Large-File Line...") {
+                store?.insertSelectedLargeFileLineWithPrompt()
+            }
+            .disabled(!(store?.selectedLargeFileCanReplaceLine ?? false))
+
+            Button("Delete Large-File Line...") {
+                store?.deleteSelectedLargeFileLineWithPrompt()
+            }
+            .disabled(!(store?.selectedLargeFileCanReplaceLine ?? false))
+
+            Button("Replace Large-File Lines...") {
+                store?.replaceSelectedLargeFileLinesWithPrompt()
+            }
+            .disabled(!(store?.selectedLargeFileCanReplaceLine ?? false))
+
+            Button("Insert Large-File Lines...") {
+                store?.insertSelectedLargeFileLinesWithPrompt()
+            }
+            .disabled(!(store?.selectedLargeFileCanReplaceLine ?? false))
+
+            Button("Delete Large-File Lines...") {
+                store?.deleteSelectedLargeFileLinesWithPrompt()
+            }
+            .disabled(!(store?.selectedLargeFileCanReplaceLine ?? false))
+
+            Button("Save Numbered Version") {
+                store?.saveVersionedCopyOfSelected()
+            }
+
+            Button("Save With Numbered Backup") {
+                store?.saveSelectedWithNumberedBackup()
+            }
+
+            Button("Save Encrypted Copy...") {
+                store?.saveSelectedEncryptedWithPrompt()
+            }
+            .disabled(!(store?.selectedBufferCanSave ?? false))
+
+            Divider()
+
+            Button("Export HTML...") {
+                store?.exportSelectedAsHTML()
+            }
+
+            Button("Export PDF...") {
+                store?.exportSelectedAsPDF()
+            }
+
+            Button("Export Word...") {
+                store?.exportSelectedAsWord()
+            }
+
+            Button("Export Drawing as SVG...") {
+                store?.exportSelectedDrawingAsSVG()
+            }
+            .disabled(!(store?.selectedBuffer?.language.isWhiteboard ?? false))
+
+            Button("Export Drawing as PNG...") {
+                store?.exportSelectedDrawingAsPNG()
+            }
+            .disabled(!(store?.selectedBuffer?.language.isWhiteboard ?? false))
+
+            Button("Copy Drawing as PNG") {
+                store?.copySelectedDrawingAsPNG()
+            }
+            .disabled(!(store?.selectedBuffer?.language.isWhiteboard ?? false))
+
+            Button("Insert Drawing Widget") {
+                store?.insertDrawingWidgetIntoMarkdown()
+            }
+            .disabled(!(
+                store?.selectedBuffer?.language.isWhiteboard == true ||
+                store?.selectedBuffer?.language.isMarkdown == true
+            ))
+
+            Button("Export CSV/TSV as Excel...") {
+                store?.exportSelectedDelimitedTableAsExcel()
+            }
+            .disabled(!(store?.selectedBuffer?.language.isDelimitedTable ?? false))
+
+            Divider()
+
+            Button("Commit Current File...") {
+                store?.commitSelectedFileWithPrompt()
+            }
+            .disabled(store?.selectedGitRepository == nil || !(store?.selectedBufferCanSave ?? false))
+
+            Divider()
+
+            Button("Add Finder Tag...") {
+                store?.addFinderTagToSelectedFileWithPrompt()
+            }
+            .disabled(store?.selectedBuffer?.filePath == nil)
+
+            Button("Clear Finder Tags") {
+                store?.clearFinderTagsForSelectedFile()
+            }
+            .disabled(store?.selectedBuffer?.filePath == nil || store?.selectedFinderTags.isEmpty != false)
+
+            Divider()
+
+            Button(store?.selectedSavePolicy == .readOnly ? "Disable Read-Only Mode" : "Enable Read-Only Mode") {
+                store?.toggleReadOnlyMode()
+            }
+
+            Button(store?.selectedSavePolicy == .temporary ? "Disable Temporary Mode" : "Enable Temporary Mode") {
+                store?.toggleTemporaryMode()
+            }
+
+            Button("Allow Saving") {
+                store?.setSelectedSavePolicy(.normal)
+            }
+            .disabled(store?.selectedSavePolicy == .normal)
+
             Divider()
 
             Button("Close Buffer") {
                 store?.closeSelected()
             }
             .keyboardShortcut("w", modifiers: [.command])
+
+            Button("Force Close Buffer") {
+                store?.forceCloseSelected()
+            }
+            .keyboardShortcut("w", modifiers: [.command, .shift])
+            .disabled(store?.selectedBuffer == nil)
         }
 
         CommandMenu("Find") {
@@ -151,9 +318,40 @@ struct SimpleLimeCommands: Commands {
                 store?.performEditorCommand(.expandSelectionToLine)
             }
             .keyboardShortcut("l", modifiers: [.command])
+
+            Divider()
+
+            Button("Toggle Fold") {
+                store?.toggleStructuredFoldAtSelection()
+            }
+            .disabled(!(store?.selectedBufferSupportsStructuredFolding ?? false))
+
+            Button("Unfold All") {
+                store?.unfoldAllStructuredBlocks()
+            }
+            .disabled(!(store?.selectedBufferSupportsStructuredFolding ?? false))
         }
 
-        CommandMenu("Comments") {
+        CommandMenu("Workflow") {
+            Button("New Workspace...") {
+                workspace.createWorkspaceWithPrompt()
+            }
+
+            Button("Rename Current Workspace...") {
+                workspace.renameActiveWorkspaceWithPrompt()
+            }
+
+            Menu("Switch Workspace") {
+                ForEach(workspace.workspaceProfiles) { profile in
+                    Button(profile.name) {
+                        workspace.switchWorkspace(profile.id)
+                    }
+                    .disabled(profile.id == workspace.activeWorkspaceID)
+                }
+            }
+
+            Divider()
+
             Button("Add Comment") {
                 store?.addCommentToSelection()
             }
@@ -161,6 +359,99 @@ struct SimpleLimeCommands: Commands {
 
             Button(store?.isCommentsPanelVisible == true ? "Hide Comments" : "Show Comments") {
                 store?.toggleCommentsPanel()
+            }
+
+            Button(store?.isScribePanelVisible == true ? "Hide Scribe" : "Show Scribe") {
+                store?.toggleScribePanel()
+            }
+
+            Button(store?.isVoiceScribeRunning == true ? "Stop Voice Scribe" : "Start Voice Scribe") {
+                store?.toggleVoiceScribe()
+            }
+
+            Divider()
+
+            Button(store?.isTasksPanelVisible == true ? "Hide Tasks" : "Show Tasks") {
+                store?.toggleTasksPanel()
+            }
+            .keyboardShortcut("t", modifiers: [.command, .shift])
+
+            Button("New Task...") {
+                store?.addManualTaskWithPrompt()
+            }
+
+            Button("Generate PO Mode Brief") {
+                store?.generatePOModeBriefForDocumentCatalog()
+            }
+            .disabled(store?.documentCatalogRootPath == nil)
+
+            Button("Add PO Gaps as Tasks") {
+                store?.addPOModeGapsAsTasks()
+            }
+            .disabled(store?.documentCatalogRootPath == nil && store?.poModeReport == nil)
+
+            Button(store?.isPOModePanelVisible == true ? "Hide PO Mode" : "Open PO Mode Panel") {
+                store?.togglePOModePanel()
+            }
+            .disabled(store?.documentCatalogRootPath == nil)
+
+            Divider()
+
+            Button(store?.isMacrosPanelVisible == true ? "Hide Macros" : "Show Macros") {
+                store?.toggleMacrosPanel()
+            }
+
+            Button("Create Macro From Selection...") {
+                store?.createTextMacroFromSelectionWithPrompt()
+            }
+
+            Button(store?.actionMacroRecording == nil ? "Start Macro Recording..." : "Stop Macro Recording...") {
+                if store?.actionMacroRecording == nil {
+                    store?.startActionMacroRecordingWithPrompt()
+                } else {
+                    store?.stopActionMacroRecordingWithPrompt()
+                }
+            }
+
+            Button("Discard Macro Recording") {
+                store?.cancelActionMacroRecording()
+            }
+            .disabled(store?.actionMacroRecording == nil)
+
+            if let actionMacros = store?.customActionMacros, !actionMacros.isEmpty {
+                Divider()
+
+                ForEach(actionMacros) { macro in
+                    Button("Play \(macro.title)") {
+                        store?.applyActionMacro(macro)
+                    }
+                }
+            }
+
+            Button("Insert PRD Template") {
+                if let macro = TextMacro.builtIns.first(where: { $0.id == "built-in:prd" }) {
+                    store?.applyTextMacro(macro)
+                }
+            }
+
+            Button("Insert 1x1 Template") {
+                if let macro = TextMacro.builtIns.first(where: { $0.id == "built-in:1x1" }) {
+                    store?.applyTextMacro(macro)
+                }
+            }
+
+            Divider()
+
+            Button(store?.isStatsPanelVisible == true ? "Hide Stats" : "Show Stats") {
+                store?.toggleStatsPanel()
+            }
+
+            Button(store?.isUsageActivityWatchEnabled == true ? "Stop Activity Watch" : "Start Activity Watch") {
+                store?.toggleUsageActivityWatch()
+            }
+
+            Button("Create Today's Timelog") {
+                store?.createTodayTimelogScratch()
             }
         }
 
@@ -221,6 +512,20 @@ struct SimpleLimeCommands: Commands {
                 store?.performTextTransform(.joinLines)
             }
             .keyboardShortcut("j", modifiers: [.command])
+
+            Divider()
+
+            Button(TextTransform.formatJSON.title) {
+                store?.performTextTransform(.formatJSON)
+            }
+
+            Button(TextTransform.minifyJSON.title) {
+                store?.performTextTransform(.minifyJSON)
+            }
+
+            Button(TextTransform.formatMarkdownTables.title) {
+                store?.performTextTransform(.formatMarkdownTables)
+            }
 
             Divider()
 
@@ -372,6 +677,23 @@ struct SimpleLimeCommands: Commands {
             }
             .keyboardShortcut("i", modifiers: [.command, .shift])
 
+            Button(store?.isCompanionPanelVisible == true ? "Hide Companion" : "Show Companion") {
+                store?.toggleCompanionPanel()
+            }
+
+            Button(store?.isCompanionAutoScanEnabled == true ? "Disable Live Companion" : "Enable Live Companion") {
+                store?.toggleCompanionAutoScan()
+            }
+
+            Button("Run Companion Scan") {
+                store?.runCompanionScan()
+            }
+
+            Button("Translate Selection...") {
+                store?.translateSelectionWithPrompt()
+            }
+            .disabled(store?.isTranslationRunning == true)
+
             Divider()
 
             Button("New Copilot Chat") {
@@ -380,6 +702,18 @@ struct SimpleLimeCommands: Commands {
 
             Button("New Codex Chat") {
                 store?.createAIChat(provider: .codex)
+            }
+
+            Button("New HTTP LLM Chat") {
+                store?.createAIChat(provider: .openAICompatible)
+            }
+
+            Button("New Anthropic Chat") {
+                store?.createAIChat(provider: .anthropic)
+            }
+
+            Button("New Gemini Chat") {
+                store?.createAIChat(provider: .gemini)
             }
         }
 
@@ -396,10 +730,11 @@ struct SimpleLimeCommands: Commands {
 
             Divider()
 
-            Button(store?.isPreviewVisible == true ? "Hide Markdown Preview" : "Show Markdown Preview") {
-                store?.toggleMarkdownPreview()
+            Button(previewCommandTitle) {
+                store?.toggleRenderedPreview()
             }
             .keyboardShortcut("p", modifiers: [.command, .option])
+            .disabled(!(store?.selectedBuffer?.language.supportsRenderedPreview ?? false))
 
             Button(store?.isOutlineVisible == true ? "Hide Markdown Outline" : "Show Markdown Outline") {
                 store?.toggleMarkdownOutline()
@@ -424,6 +759,28 @@ struct SimpleLimeCommands: Commands {
                 store?.toggleTypewriterMode()
             }
             .keyboardShortcut("t", modifiers: [.command, .option])
+
+            Button(store?.isTerminalPanelVisible == true ? "Hide Terminal" : "Show Terminal") {
+                store?.toggleTerminalPanel()
+            }
+            .keyboardShortcut("j", modifiers: [.command, .shift])
+
+            Button("Restart Terminal") {
+                if let id = store?.selectedTerminalSessionID {
+                    store?.restartTerminalSession(id)
+                }
+            }
+            .disabled(store?.selectedTerminalSessionID == nil)
+
+            Button("Run Terminal Diagnostics") {
+                store?.runSelectedTerminalDiagnostics()
+            }
+            .disabled(store == nil)
+
+            Button("Create Editor Diagnostics") {
+                store?.createEditorDiagnosticsScratch()
+            }
+            .disabled(store?.selectedBuffer == nil)
 
             Button(store?.wrapsLines == true ? "Disable Word Wrap" : "Enable Word Wrap") {
                 store?.toggleWrapLines()

@@ -48,13 +48,70 @@ enum SyntaxHighlighter {
         switch language {
         case .markdown:
             applyMarkdown(to: storage, text: string, baseFont: baseFont)
-        case .plain:
+        case .plain, .yaml, .csv, .tsv, .image, .pdf, .hex:
             break
         default:
             applyCode(to: storage, text: string, language: language, baseFont: baseFont)
         }
 
+        applyTypographicDashMarks(text: string) { attributes, range in
+            storage?.addAttributes(attributes, range: range)
+        }
+
         storage?.endEditing()
+    }
+
+    static func attributedLine(
+        _ text: String,
+        language: EditorLanguage,
+        fontSize: CGFloat
+    ) -> NSAttributedString {
+        let attributed = NSMutableAttributedString(string: text)
+        let fullRange = NSRange(location: 0, length: (text as NSString).length)
+        let baseFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 2
+
+        guard fullRange.length > 0 else {
+            return NSAttributedString(
+                string: text,
+                attributes: [
+                    .font: baseFont,
+                    .foregroundColor: NSColor.labelColor,
+                    .paragraphStyle: paragraph
+                ]
+            )
+        }
+
+        attributed.setAttributes(
+            [
+                .font: baseFont,
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paragraph
+            ],
+            range: fullRange
+        )
+
+        if fullRange.length <= complexHighlightCharacterLimit {
+            switch language {
+            case .markdown:
+                applyMarkdown(text: text, baseFont: baseFont) { attributes, range in
+                    attributed.addAttributes(attributes, range: range)
+                }
+            case .plain, .yaml, .csv, .tsv, .image, .pdf, .hex:
+                break
+            default:
+                applyCode(text: text, language: language, baseFont: baseFont) { attributes, range in
+                    attributed.addAttributes(attributes, range: range)
+                }
+            }
+        }
+
+        applyTypographicDashMarks(text: text) { attributes, range in
+            attributed.addAttributes(attributes, range: range)
+        }
+
+        return attributed
     }
 
     @MainActor
@@ -91,11 +148,41 @@ enum SyntaxHighlighter {
         switch language {
         case .markdown:
             applyMarkdown(to: textView, text: string, baseFont: baseFont)
-        case .plain:
+        case .plain, .yaml, .csv, .tsv, .image, .pdf, .hex:
             break
         default:
             applyCode(to: textView, text: string, language: language, baseFont: baseFont)
         }
+
+        applyTypographicDashMarks(text: string) { attributes, range in
+            textView.addAttributes(attributes, range: range)
+        }
+    }
+
+    @MainActor
+    static func applyBaseFormatting(to textView: STTextView, fontSize: CGFloat) {
+        let string = textView.text ?? ""
+        let fullRange = NSRange(location: 0, length: (string as NSString).length)
+        let baseFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 2
+
+        textView.font = baseFont
+        textView.textColor = .labelColor
+        textView.defaultParagraphStyle = paragraph
+
+        guard fullRange.length > 0 else {
+            return
+        }
+
+        textView.setAttributes(
+            [
+                .font: baseFont,
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paragraph
+            ],
+            range: fullRange
+        )
     }
 
     private static func applyMarkdown(to storage: NSTextStorage?, text: String, baseFont: NSFont) {
@@ -244,6 +331,41 @@ enum SyntaxHighlighter {
         }
     }
 
+    private static func applyTypographicDashMarks(text: String, addAttributes: AttributeApplicator) {
+        let nsText = text as NSString
+        var location = 0
+
+        while location < nsText.length {
+            let range = nsText.rangeOfComposedCharacterSequence(at: location)
+            let token = nsText.substring(with: range)
+
+            if isTypographicDash(token) {
+                addAttributes(
+                    [
+                        .foregroundColor: NSColor.systemPink,
+                        .backgroundColor: NSColor.systemPink.withAlphaComponent(0.13),
+                        .underlineStyle: NSUnderlineStyle.single.rawValue,
+                        .underlineColor: NSColor.systemPink
+                    ],
+                    range
+                )
+            }
+
+            let nextLocation = range.location + max(range.length, 1)
+            guard nextLocation > location else { break }
+            location = nextLocation
+        }
+    }
+
+    private static func isTypographicDash(_ value: String) -> Bool {
+        switch value {
+        case "\u{2010}", "\u{2011}", "\u{2012}", "\u{2013}", "\u{2014}", "\u{2015}", "\u{2212}":
+            return true
+        default:
+            return false
+        }
+    }
+
     private static func keywordPattern(for language: EditorLanguage) -> String {
         switch language {
         case .swift:
@@ -266,7 +388,7 @@ enum SyntaxHighlighter {
             return "as|async|await|break|const|continue|crate|else|enum|extern|false|fn|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|self|Self|static|struct|super|trait|true|type|unsafe|use|where|while"
         case .shell:
             return "case|do|done|elif|else|esac|fi|for|function|if|in|then|while"
-        case .plain, .markdown:
+        case .plain, .markdown, .yaml, .csv, .tsv, .image, .pdf, .hex, .drawing:
             return ""
         }
     }
@@ -410,6 +532,8 @@ enum SyntaxHighlighter {
             fileExtension = "sh"
         case "json", "jsonl":
             fileExtension = "json"
+        case "yaml", "yml":
+            fileExtension = "yaml"
         case "swift":
             fileExtension = "swift"
         default:

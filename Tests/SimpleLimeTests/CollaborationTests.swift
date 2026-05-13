@@ -376,6 +376,21 @@ final class EditorStoreCollaborationTests: XCTestCase {
         XCTAssertEqual(store.selectedBuffer?.text, "draft")
     }
 
+    func testSelfHostedRelayCreatesShareLinkAndCollaborationSession() throws {
+        let store = makeStore(text: "draft")
+        let port = UInt16.random(in: 49_000...60_000)
+
+        store.startSelfHostedCollaborationRelay(port: port)
+        defer { store.stopCollaborationRelay() }
+
+        let relay = try XCTUnwrap(store.collaborationRelayState)
+        XCTAssertEqual(relay.role, .host)
+        XCTAssertEqual(relay.shareURL.scheme, "simplelime")
+        XCTAssertTrue(relay.shareURL.absoluteString.contains("room="))
+        XCTAssertTrue(store.collaborationSession?.isHost == true)
+        XCTAssertTrue(store.isNetworkPanelVisible)
+    }
+
     private func makeStore(text: String, networkShare: NetworkShareService? = nil) -> EditorStore {
         var buffer = EditorBuffer.scratch(index: 1)
         buffer.text = text

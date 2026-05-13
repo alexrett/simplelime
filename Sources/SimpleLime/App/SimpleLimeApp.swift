@@ -3,11 +3,13 @@ import SwiftUI
 
 extension Notification.Name {
     static let simpleLimeOpenURLs = Notification.Name("SimpleLimeOpenURLs")
+    static let simpleLimeOpenCollaborationLinks = Notification.Name("SimpleLimeOpenCollaborationLinks")
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static var pendingOpenURLs: [URL] = []
-    private var windowObserver: NSObjectProtocol?
+    private static var pendingCollaborationLinks: [URL] = []
+    private var windowObservers: [NSObjectProtocol] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
@@ -15,7 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         CommentReminderService.shared.activate()
 
-        windowObserver = NotificationCenter.default.addObserver(
+        let center = NotificationCenter.default
+        windowObservers.append(center.addObserver(
             forName: NSWindow.didBecomeMainNotification,
             object: nil,
             queue: .main
@@ -24,7 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Self.configure(window)
             }
             self?.removeSystemTabbingMenuItems()
-        }
+        })
 
         DispatchQueue.main.async { [weak self] in
             NSApp.windows.forEach(Self.configure)
@@ -39,13 +42,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
-        false
+        true
     }
 
     deinit {
-        if let windowObserver {
-            NotificationCenter.default.removeObserver(windowObserver)
-        }
+        windowObservers.forEach(NotificationCenter.default.removeObserver)
     }
 
     static func drainPendingOpenURLs() -> [URL] {
@@ -54,13 +55,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return urls
     }
 
+    static func drainPendingCollaborationLinks() -> [URL] {
+        let urls = pendingCollaborationLinks
+        pendingCollaborationLinks.removeAll()
+        return urls
+    }
+
     private static func configure(_ window: NSWindow) {
-        window.tabbingMode = .disallowed
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        window.styleMask.insert(.fullSizeContentView)
-        window.isMovableByWindowBackground = false
-        window.animationBehavior = .none
+        guard EditorWindowChrome.isEditorWindow(window) else { return }
+        EditorWindowChrome.configure(window)
     }
 
     private func removeSystemTabbingMenuItems() {
@@ -75,14 +78,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private static func enqueueOpenURLs(_ urls: [URL]) {
         let fileURLs = urls.filter { $0.isFileURL }
-        guard !fileURLs.isEmpty else { return }
+        let collaborationURLs = urls.filter { CollaborationRelayLink(url: $0) != nil }
 
-        pendingOpenURLs.append(contentsOf: fileURLs)
-        NotificationCenter.default.post(
-            name: .simpleLimeOpenURLs,
-            object: nil,
-            userInfo: ["urls": fileURLs]
-        )
+        if !fileURLs.isEmpty {
+            pendingOpenURLs.append(contentsOf: fileURLs)
+            NotificationCenter.default.post(
+                name: .simpleLimeOpenURLs,
+                object: nil,
+                userInfo: ["urls": fileURLs]
+            )
+        }
+
+        if !collaborationURLs.isEmpty {
+            pendingCollaborationLinks.append(contentsOf: collaborationURLs)
+            NotificationCenter.default.post(
+                name: .simpleLimeOpenCollaborationLinks,
+                object: nil,
+                userInfo: ["urls": collaborationURLs]
+            )
+        }
     }
 
     private static func fileURLsFromCommandLine() -> [URL] {
@@ -102,7 +116,7 @@ struct SimpleLimeApp: App {
     @StateObject private var workspace = WorkspaceStore()
 
     var body: some Scene {
-        Window("SimpleLime", id: "main") {
+        WindowGroup("SimpleLime") {
             WorkspaceRootView(workspace: workspace)
                 .frame(minWidth: 320, minHeight: 320)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
@@ -129,7 +143,7 @@ private struct WorkspaceRootView: View {
 
     var body: some View {
         if let store = workspace.store(for: workspace.primaryGroupID) {
-            ContentView(store: store) {
+            ContentView(store: store, workspace: workspace) {
                 workspace.activate(workspace.primaryGroupID)
             }
         } else {

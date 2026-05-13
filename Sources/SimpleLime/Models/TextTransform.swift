@@ -1,6 +1,6 @@
 import Foundation
 
-enum TextTransform: String, CaseIterable, Identifiable {
+enum TextTransform: String, CaseIterable, Codable, Identifiable {
     case uppercase
     case lowercase
     case titlecase
@@ -11,6 +11,9 @@ enum TextTransform: String, CaseIterable, Identifiable {
     case trimTrailingWhitespace
     case duplicateLine
     case joinLines
+    case formatJSON
+    case minifyJSON
+    case formatMarkdownTables
 
     var id: String { rawValue }
 
@@ -26,6 +29,9 @@ enum TextTransform: String, CaseIterable, Identifiable {
         case .trimTrailingWhitespace: "Trim Trailing Whitespace"
         case .duplicateLine: "Duplicate Line"
         case .joinLines: "Join Lines"
+        case .formatJSON: "Format JSON"
+        case .minifyJSON: "Minify JSON"
+        case .formatMarkdownTables: "Format Markdown Tables"
         }
     }
 }

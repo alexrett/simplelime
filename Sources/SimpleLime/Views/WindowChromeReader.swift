@@ -21,6 +21,7 @@ struct WindowChromeReader: NSViewRepresentable {
         let reader = nsView as? ReaderView
         reader?.state = state
         reader?.onBecomeMain = onBecomeMain
+        reader?.configureWindow()
         reader?.updateState()
     }
 
@@ -28,6 +29,8 @@ struct WindowChromeReader: NSViewRepresentable {
         weak var state: WindowChromeState?
         var onBecomeMain: () -> Void = {}
         private var observers: [NSObjectProtocol] = []
+        private weak var observedTitleWindow: NSWindow?
+        private var titleObservation: NSKeyValueObservation?
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -43,19 +46,13 @@ struct WindowChromeReader: NSViewRepresentable {
         func updateState() {
             guard let window else { return }
             let isFullScreen = window.styleMask.contains(.fullScreen)
-            if state?.isFullScreen != isFullScreen {
-                state?.isFullScreen = isFullScreen
-            }
+            publishFullScreenState(isFullScreen)
         }
 
-        private func configureWindow() {
+        func configureWindow() {
             guard let window else { return }
-            window.tabbingMode = .disallowed
-            window.titleVisibility = .hidden
-            window.titlebarAppearsTransparent = true
-            window.styleMask.insert(.fullSizeContentView)
-            window.isMovableByWindowBackground = false
-            window.animationBehavior = .none
+            EditorWindowChrome.configure(window)
+            installTitleObserver(for: window)
         }
 
         private func installObservers() {
@@ -79,9 +76,35 @@ struct WindowChromeReader: NSViewRepresentable {
 
             observers.append(
                 center.addObserver(forName: NSWindow.didBecomeMainNotification, object: window, queue: .main) { [weak self] _ in
-                    self?.onBecomeMain()
+                    self?.configureWindow()
+                    self?.publishBecomeMain()
                 }
             )
+            installTitleObserver(for: window)
+        }
+
+        private func installTitleObserver(for window: NSWindow) {
+            guard observedTitleWindow !== window else { return }
+            titleObservation?.invalidate()
+            observedTitleWindow = window
+            titleObservation = window.observe(\.title, options: [.new]) { [weak self] _, _ in
+                DispatchQueue.main.async {
+                    self?.configureWindow()
+                }
+            }
+        }
+
+        private func publishFullScreenState(_ isFullScreen: Bool) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.state?.isFullScreen != isFullScreen else { return }
+                self.state?.isFullScreen = isFullScreen
+            }
+        }
+
+        private func publishBecomeMain() {
+            DispatchQueue.main.async { [weak self] in
+                self?.onBecomeMain()
+            }
         }
     }
 }

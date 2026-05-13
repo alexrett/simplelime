@@ -18,6 +18,9 @@ struct TabBarView: NSViewRepresentable {
 final class TabBarControl: NSView, NSDraggingSource {
     private static let tabPasteboardType = NSPasteboard.PasteboardType("com.whitehappypony.simplelime.tab")
     private static let tabPayloadPrefix = "simplelime-tab"
+    static let minimumTrafficLightInset: CGFloat = 96
+    static let maximumTrafficLightInset: CGFloat = 132
+    static let trafficLightPassthroughPadding: CGFloat = 8
 
     private weak var store: EditorStore?
     private var buffers: [EditorBuffer] = []
@@ -30,6 +33,7 @@ final class TabBarControl: NSView, NSDraggingSource {
     private var closeHoverID: UUID?
 
     override var isFlipped: Bool { true }
+    override var isOpaque: Bool { false }
     override var acceptsFirstResponder: Bool { true }
     override var intrinsicContentSize: NSSize {
         NSSize(width: NSView.noIntrinsicMetric, height: 38)
@@ -37,17 +41,20 @@ final class TabBarControl: NSView, NSDraggingSource {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        setContentHuggingPriority(.required, for: .vertical)
-        setContentCompressionResistancePriority(.required, for: .vertical)
-        wantsLayer = true
-        registerForDraggedTypes([Self.tabPasteboardType])
+        configureView()
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
+        configureView()
+    }
+
+    private func configureView() {
         setContentHuggingPriority(.required, for: .vertical)
         setContentCompressionResistancePriority(.required, for: .vertical)
         wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        layer?.isOpaque = false
         registerForDraggedTypes([Self.tabPasteboardType])
     }
 
@@ -61,13 +68,23 @@ final class TabBarControl: NSView, NSDraggingSource {
         needsDisplay = true
     }
 
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if let passthroughRect = trafficLightPassthroughRect,
+           passthroughRect.contains(point) {
+            return nil
+        }
+
+        return super.hitTest(point)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
         NSColor.windowBackgroundColor.setFill()
-        bounds.fill()
+        let passthroughRect = trafficLightPassthroughRect
+        fill(bounds, excluding: passthroughRect)
 
-        drawLeadingArea()
+        drawLeadingArea(excluding: passthroughRect)
         drawTabs()
         drawPlusButton()
         drawBottomDivider()
@@ -251,11 +268,14 @@ final class TabBarControl: NSView, NSDraggingSource {
         return image
     }
 
-    private func drawLeadingArea() {
+    private func drawLeadingArea(excluding excludedRect: NSRect?) {
         guard leadingInset > 0 else { return }
 
         NSColor.windowBackgroundColor.setFill()
-        NSRect(x: 0, y: 0, width: leadingInset, height: bounds.height).fill()
+        fill(
+            NSRect(x: 0, y: 0, width: leadingInset, height: bounds.height),
+            excluding: excludedRect
+        )
         drawVerticalDivider(at: leadingInset)
     }
 
@@ -454,17 +474,87 @@ final class TabBarControl: NSView, NSDraggingSource {
         guard let window,
               let zoomButton = window.standardWindowButton(.zoomButton),
               let buttonContainer = zoomButton.superview else {
-            return 96
+            return Self.minimumTrafficLightInset
         }
 
         let buttonFrameInWindow = buttonContainer.convert(zoomButton.frame, to: nil)
         let buttonFrame = convert(buttonFrameInWindow, from: nil)
 
         guard buttonFrame.width > 0, buttonFrame.maxX > 0 else {
-            return 96
+            return Self.minimumTrafficLightInset
         }
 
-        return max(96, ceil(buttonFrame.maxX + 16))
+        return Self.clampedTrafficLightInset(forButtonMaxX: buttonFrame.maxX)
+    }
+
+    private var trafficLightPassthroughRect: NSRect? {
+        guard leadingInset > 0,
+              let window,
+              !window.styleMask.contains(.fullScreen) else {
+            return nil
+        }
+
+        let frames = [
+            NSWindow.ButtonType.closeButton,
+            .miniaturizeButton,
+            .zoomButton
+        ].compactMap { buttonFrameInLocalCoordinates($0) }
+
+        return Self.trafficLightPassthroughRect(forButtonFrames: frames, bounds: bounds)
+    }
+
+    private func buttonFrameInLocalCoordinates(_ buttonType: NSWindow.ButtonType) -> NSRect? {
+        guard let window,
+              let button = window.standardWindowButton(buttonType),
+              let buttonContainer = button.superview else {
+            return nil
+        }
+
+        let buttonFrameInWindow = buttonContainer.convert(button.frame, to: nil)
+        return convert(buttonFrameInWindow, from: nil)
+    }
+
+    static func trafficLightPassthroughRect(
+        forButtonFrames buttonFrames: [NSRect],
+        bounds: NSRect,
+        padding: CGFloat = 8
+    ) -> NSRect? {
+        guard let firstFrame = buttonFrames.first else { return nil }
+
+        let union = buttonFrames.dropFirst().reduce(firstFrame) { partialResult, frame in
+            partialResult.union(frame)
+        }
+        let padded = union.insetBy(dx: -padding, dy: -padding)
+        let clipped = padded.intersection(bounds)
+
+        return clipped.isEmpty || clipped.isNull ? nil : clipped
+    }
+
+    private func fill(_ rect: NSRect, excluding excludedRect: NSRect?) {
+        guard let intersection = excludedRect?.intersection(rect),
+              !intersection.isEmpty,
+              !intersection.isNull else {
+            rect.fill()
+            return
+        }
+
+        let pieces = [
+            NSRect(x: rect.minX, y: rect.minY, width: intersection.minX - rect.minX, height: rect.height),
+            NSRect(x: intersection.maxX, y: rect.minY, width: rect.maxX - intersection.maxX, height: rect.height),
+            NSRect(x: intersection.minX, y: rect.minY, width: intersection.width, height: intersection.minY - rect.minY),
+            NSRect(x: intersection.minX, y: intersection.maxY, width: intersection.width, height: rect.maxY - intersection.maxY)
+        ]
+
+        pieces
+            .filter { $0.width > 0 && $0.height > 0 }
+            .forEach { $0.fill() }
+    }
+
+    static func clampedTrafficLightInset(forButtonMaxX buttonMaxX: CGFloat) -> CGFloat {
+        min(
+            maximumTrafficLightInset,
+            max(minimumTrafficLightInset, ceil(buttonMaxX + 16))
+        )
     }
 }
 

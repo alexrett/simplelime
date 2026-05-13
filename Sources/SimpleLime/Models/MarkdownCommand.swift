@@ -1,6 +1,6 @@
 import Foundation
 
-enum MarkdownCommand: String, CaseIterable, Identifiable {
+enum MarkdownCommand: String, CaseIterable, Codable, Identifiable {
     case bold
     case italic
     case inlineCode

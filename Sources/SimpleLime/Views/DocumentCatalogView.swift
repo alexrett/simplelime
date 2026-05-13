@@ -85,6 +85,14 @@ struct DocumentCatalogView: View {
 
             if store.documentCatalogRootPath != nil {
                 Button {
+                    store.refreshPOModeAnalysisForDocumentCatalog()
+                } label: {
+                    Image(systemName: "point.3.connected.trianglepath.dotted")
+                }
+                .buttonStyle(.borderless)
+                .help("Open PO mode panel")
+
+                Button {
                     store.refreshDocumentCatalog()
                 } label: {
                     Image(systemName: "arrow.clockwise")
@@ -199,6 +207,19 @@ private struct DocumentCatalogNodeRow: View {
     }
 
     private var iconName: String {
-        EditorLanguage.detect(fileName: node.name).isMarkdown ? "doc.richtext" : "doc.text"
+        let language = EditorLanguage.detect(fileName: node.name)
+        if language.isMarkdown {
+            return "doc.richtext"
+        }
+        if language.isDelimitedTable {
+            return "tablecells"
+        }
+        if language == .image {
+            return "photo"
+        }
+        if language == .pdf {
+            return "doc.richtext"
+        }
+        return "doc.text"
     }
 }

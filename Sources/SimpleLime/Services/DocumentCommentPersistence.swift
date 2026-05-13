@@ -9,7 +9,11 @@ final class DocumentCommentPersistence {
     private let fileManager: FileManager
     private let fileURL: URL
 
-    init(fileManager: FileManager = .default, fileURL: URL? = nil) {
+    init(
+        fileManager: FileManager = .default,
+        defaults: UserDefaults = .standard,
+        fileURL: URL? = nil
+    ) {
         self.fileManager = fileManager
 
         if let fileURL {
@@ -17,12 +21,7 @@ final class DocumentCommentPersistence {
             return
         }
 
-        let baseURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-
-        self.fileURL = baseURL
-            .appendingPathComponent("SimpleLime", isDirectory: true)
-            .appendingPathComponent("comments.json", isDirectory: false)
+        self.fileURL = Self.defaultCommentsURL(fileManager: fileManager, defaults: defaults)
     }
 
     func load() -> [DocumentComment] {
@@ -43,6 +42,14 @@ final class DocumentCommentPersistence {
             StoredDocumentComments(version: 1, comments: comments)
         )
         try data.write(to: fileURL, options: .atomic)
+    }
+
+    static func defaultCommentsURL(
+        fileManager: FileManager = .default,
+        defaults: UserDefaults = .standard
+    ) -> URL {
+        AppDataStorage.currentRootURL(fileManager: fileManager, defaults: defaults)
+            .appendingPathComponent("comments.json", isDirectory: false)
     }
 }
 

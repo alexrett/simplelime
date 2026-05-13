@@ -4,15 +4,10 @@ struct AIBufferFileBridge {
     private let fileManager: FileManager
     private let rootURL: URL
 
-    init(fileManager: FileManager = .default) {
+    init(fileManager: FileManager = .default, defaults: UserDefaults = .standard) {
         self.fileManager = fileManager
 
-        let baseURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-
-        rootURL = baseURL
-            .appendingPathComponent("SimpleLime", isDirectory: true)
-            .appendingPathComponent("AgentBuffers", isDirectory: true)
+        rootURL = Self.defaultRootURL(fileManager: fileManager, defaults: defaults)
     }
 
     func editableURL(for buffer: EditorBuffer) -> URL {
@@ -33,6 +28,14 @@ struct AIBufferFileBridge {
         return try? String(contentsOf: url, encoding: .utf8)
     }
 
+    static func defaultRootURL(
+        fileManager: FileManager = .default,
+        defaults: UserDefaults = .standard
+    ) -> URL {
+        AppDataStorage.currentRootURL(fileManager: fileManager, defaults: defaults)
+            .appendingPathComponent("AgentBuffers", isDirectory: true)
+    }
+
     func mimeType(for buffer: EditorBuffer) -> String {
         switch buffer.language {
         case .markdown: "text/markdown"
@@ -40,13 +43,20 @@ struct AIBufferFileBridge {
         case .javascript: "text/javascript"
         case .typescript: "text/typescript"
         case .json: "application/json"
+        case .yaml: "application/x-yaml"
         case .html: "text/html"
         case .css: "text/css"
+        case .csv: "text/csv"
+        case .tsv: "text/tab-separated-values"
         case .python: "text/x-python"
         case .ruby: "text/x-ruby"
         case .go: "text/x-go"
         case .rust: "text/x-rust"
         case .shell: "text/x-shellscript"
+        case .drawing: "application/json"
+        case .image: "application/octet-stream"
+        case .pdf: "application/pdf"
+        case .hex: "application/octet-stream"
         case .plain: "text/plain"
         }
     }
@@ -69,13 +79,20 @@ struct AIBufferFileBridge {
         case .javascript: return "js"
         case .typescript: return "ts"
         case .json: return "json"
+        case .yaml: return "yaml"
         case .html: return "html"
         case .css: return "css"
+        case .csv: return "csv"
+        case .tsv: return "tsv"
         case .python: return "py"
         case .ruby: return "rb"
         case .go: return "go"
         case .rust: return "rs"
         case .shell: return "sh"
+        case .drawing: return WhiteboardDocument.fileExtension
+        case .image: return "bin"
+        case .pdf: return "pdf"
+        case .hex: return "bin"
         case .plain: return "txt"
         }
     }

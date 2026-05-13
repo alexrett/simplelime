@@ -32,5 +32,6 @@ enum EditorShortcut {
     case nextTab
     case previousTab
     case toggleAI
+    case toggleTerminal
     case escape
 }

@@ -7,68 +7,34 @@ struct EditorWorkspaceView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if store.isAIPanelVisible {
-                HSplitView {
-                    contentWithComments
-                        .frame(minWidth: 180)
-                    AIChatPanelView(store: store, buffer: buffer)
-                }
-            } else {
-                contentWithComments
-            }
-
-            StatusBarView(store: store, buffer: buffer)
+            workspaceContent
+            StatusBarView(store: store, buffer: buffer, visibleLineRange: sourceVisibleLineRange)
         }
         .clipped()
     }
 
-    private var contentWithComments: some View {
-        Group {
-            if store.isCommentsPanelVisible {
-                HSplitView {
-                    mainEditorContent
-                        .frame(minWidth: 220)
-                    CommentsPanelView(store: store, buffer: buffer)
-                        .frame(minWidth: 240, idealWidth: 300, maxWidth: 420)
-                }
-            } else {
-                mainEditorContent
-            }
-        }
-    }
-
-    private var mainEditorContent: some View {
-        Group {
-            if store.isOutlineVisible, buffer.language.isMarkdown {
-                HSplitView {
-                    MarkdownOutlineView(
-                        text: buffer.text,
-                        selectionRanges: buffer.selectionRanges,
-                        onSelect: { heading in
-                            store.jumpToHeading(heading)
-                        }
-                    )
-                    .frame(minWidth: 170, idealWidth: 220, maxWidth: 320)
-
-                    editorContent
-                        .frame(minWidth: 180)
-                }
-            } else {
+    @ViewBuilder
+    private var workspaceContent: some View {
+        if store.isTerminalPanelVisible {
+            VSplitView {
                 editorContent
+                    .frame(minHeight: 160)
+                TerminalPanelView(store: store)
             }
+        } else {
+            editorContent
         }
     }
 
     private var editorContent: some View {
         Group {
-            if store.isPreviewVisible, buffer.language.isMarkdown {
+            if buffer.language.isBinaryPreview, let filePath = buffer.filePath {
+                BinaryFilePreviewView(fileURL: URL(fileURLWithPath: filePath), language: buffer.language)
+            } else if store.isPreviewVisible, buffer.language.supportsRenderedPreview, canShowRenderedPreview {
                 HSplitView {
                     editorPane
                         .frame(minWidth: 180)
-                    MarkdownPreviewView(
-                        text: buffer.text,
-                        baseURL: buffer.filePath.map { URL(fileURLWithPath: $0).deletingLastPathComponent() }
-                    )
+                    renderedPreview
                         .frame(minWidth: 200)
                 }
             } else {
@@ -77,10 +43,37 @@ struct EditorWorkspaceView: View {
         }
     }
 
+    @ViewBuilder
+    private var renderedPreview: some View {
+        if buffer.language.isMarkdown {
+            MarkdownPreviewView(
+                text: buffer.text,
+                baseURL: buffer.filePath.map { URL(fileURLWithPath: $0).deletingLastPathComponent() }
+            )
+        } else if buffer.language.isDelimitedTable {
+            if buffer.isLargeFileMode, let filePath = buffer.filePath {
+                DelimitedVirtualTablePreviewView(
+                    fileURL: URL(fileURLWithPath: filePath),
+                    language: buffer.language
+                )
+            } else {
+                DelimitedTablePreviewView(
+                    text: buffer.text,
+                    language: buffer.language,
+                    isLargeFilePreview: buffer.isLargeFileMode
+                )
+            }
+        }
+    }
+
+    private var canShowRenderedPreview: Bool {
+        !buffer.isLargeFileMode || buffer.language.isDelimitedTable
+    }
+
     private var editorPane: some View {
-        HStack(spacing: 0) {
+        HStack(alignment: .top, spacing: 0) {
             editor
-            if store.isMiniMapVisible, !store.isWysiwygModeEnabled {
+            if store.isMiniMapVisible, !store.isWysiwygModeEnabled, !buffer.isLargeFileMode, !buffer.language.isWhiteboard {
                 EditorMiniMapView(
                     text: buffer.text,
                     selectionRanges: buffer.selectionRanges,
@@ -90,13 +83,15 @@ struct EditorWorkspaceView: View {
                     }
                 )
                 .frame(width: 86)
+                .frame(maxHeight: .infinity, alignment: .top)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var editor: some View {
         Group {
-            if buffer.language.isMarkdown, store.isWysiwygModeEnabled {
+            if buffer.language.isMarkdown, store.isWysiwygModeEnabled, !buffer.isLargeFileMode {
                 MarkdownWYSIWYGEditorView(
                     text: textBinding,
                     selectionRanges: selectionBinding,
@@ -114,29 +109,88 @@ struct EditorWorkspaceView: View {
                         store.registerEditorCommandHandler(handler)
                     }
                 )
-            } else {
-                CodeEditorView(
-                    text: textBinding,
-                    selectionRanges: selectionBinding,
-                    language: store.buffers.first(where: { $0.id == buffer.id })?.language ?? buffer.language,
+            } else if buffer.language.isWhiteboard {
+                WhiteboardView(text: textBinding)
+            } else if buffer.isLargeFileMode,
+                      store.buffers.first(where: { $0.id == buffer.id }).map({ !store.bufferCanEditLargeFileChunk($0) }) != false,
+                      let filePath = buffer.filePath {
+                let liveBuffer = store.buffers.first(where: { $0.id == buffer.id }) ?? buffer
+                LargeFileVirtualTextView(
+                    fileURL: URL(fileURLWithPath: filePath),
+                    language: liveBuffer.language,
+                    fileSizeBytes: liveBuffer.fileSizeBytes,
                     fontSize: store.fontSize,
-                    wrapsLines: store.wrapsLines,
-                    focusModeEnabled: store.isFocusModeEnabled,
-                    typewriterModeEnabled: store.isTypewriterModeEnabled,
-                    comments: store.comments(for: buffer),
-                    activeCommentID: store.selectedCommentID,
-                    collaborators: store.collaborators(for: buffer),
-                    onShortcut: handleShortcut,
+                    targetByteOffset: liveBuffer.largeFilePreviewStartOffsetBytes,
+                    contentRevision: liveBuffer.updatedAt.timeIntervalSinceReferenceDate,
+                    onLineActivation: { lineNumber in
+                        store.editSelectedLargeFileChunk(containingLine: lineNumber)
+                    },
+                    onLineReplacementRequest: { lineNumber, replacementText in
+                        store.replaceSelectedLargeFileLine(lineNumber, with: replacementText)
+                    },
+                    onLineInsertionRequest: { lineNumber, insertedText in
+                        store.insertSelectedLargeFileLine(lineNumber, text: insertedText)
+                    },
+                    onLineDeletionRequest: { lineNumber in
+                        store.deleteSelectedLargeFileLine(lineNumber)
+                    },
                     onVisibleLineRangeChange: { lineRange in
                         sourceVisibleLineRange = lineRange
-                    },
-                    onRegisterEditorCommandHandler: { handler in
-                        store.registerEditorCommandHandler(handler)
+                        store.updateLargeFileVisibleLineRange(lineRange, for: buffer.id)
                     }
+                )
+                .help("Click a line to edit it inline. Double-click a line to open a bounded editable chunk; Cmd-S saves the chunk back to the source file.")
+            } else {
+                SourceEditorView(
+                    text: textBinding,
+                    selectionRanges: selectionBinding,
+                    configuration: sourceEditorConfiguration(for: buffer),
+                    decorations: sourceEditorDecorations(for: buffer),
+                    callbacks: sourceEditorCallbacks(for: buffer)
                 )
             }
         }
         .clipped()
+    }
+
+    private func sourceEditorConfiguration(for buffer: EditorBuffer) -> SourceEditorConfiguration {
+        let liveBuffer = store.buffers.first(where: { $0.id == buffer.id }) ?? buffer
+        let largeFileEditingCapability = store.largeFileEditingCapability(for: liveBuffer)
+        return SourceEditorConfiguration(
+            engine: store.sourceEditorEngine,
+            language: liveBuffer.language,
+            fontSize: store.fontSize,
+            wrapsLines: store.wrapsLines,
+            columnGuide: store.columnGuide,
+            foldedRanges: store.foldedRanges(for: buffer),
+            syntaxHighlightingEnabled: !buffer.isLargeFileMode || largeFileEditingCapability.canEditLoadedText,
+            isEditable: !buffer.isLargeFileMode || largeFileEditingCapability.canEditLoadedText,
+            focusModeEnabled: store.isFocusModeEnabled,
+            typewriterModeEnabled: store.isTypewriterModeEnabled
+        )
+    }
+
+    private func sourceEditorDecorations(for buffer: EditorBuffer) -> SourceEditorDecorations {
+        SourceEditorDecorations(
+            comments: store.comments(for: buffer),
+            activeCommentID: store.selectedCommentID,
+            collaborators: store.collaborators(for: buffer)
+        )
+    }
+
+    private func sourceEditorCallbacks(for buffer: EditorBuffer) -> SourceEditorCallbacks {
+        SourceEditorCallbacks(
+            onShortcut: handleShortcut,
+            onVisibleLineRangeChange: { lineRange in
+                sourceVisibleLineRange = lineRange
+            },
+            onToggleFoldAtLine: { lineNumber in
+                store.toggleStructuredFold(containingLine: lineNumber, in: buffer.id)
+            },
+            onRegisterEditorCommandHandler: { handler in
+                store.registerEditorCommandHandler(handler)
+            }
+        )
     }
 
     private var textBinding: Binding<String> {
@@ -217,6 +271,8 @@ struct EditorWorkspaceView: View {
             store.selectPreviousTab()
         case .toggleAI:
             store.toggleAIPanel()
+        case .toggleTerminal:
+            store.toggleTerminalPanel()
         case .escape:
             store.escape()
         }
@@ -241,7 +297,7 @@ struct EditorMiniMapLayout: Equatable {
     }
 
     var top: CGFloat {
-        max(0, (height - contentHeight) / 2)
+        0
     }
 
     func lineNumber(at y: CGFloat) -> Int {
@@ -382,7 +438,7 @@ private struct EditorMiniMapView: View {
     }
 }
 
-private struct CommentsPanelView: View {
+struct CommentsPanelView: View {
     @ObservedObject var store: EditorStore
     let buffer: EditorBuffer
 
@@ -572,7 +628,7 @@ private struct CommentsPanelView: View {
     }
 }
 
-private struct MarkdownOutlineView: View {
+struct MarkdownOutlineView: View {
     let text: String
     let selectionRanges: [TextRange]
     let onSelect: (MarkdownHeading) -> Void
@@ -670,6 +726,7 @@ private struct MarkdownOutlineView: View {
 private struct StatusBarView: View {
     @ObservedObject var store: EditorStore
     let buffer: EditorBuffer
+    let visibleLineRange: ClosedRange<Int>
 
     private var stats: TextDocumentStats {
         MarkdownDocumentInfo.stats(for: buffer.text)
@@ -689,7 +746,13 @@ private struct StatusBarView: View {
     }
 
     private func statusContent(style: StatusBarDensity) -> some View {
-        HStack(spacing: style.spacing) {
+        let finderTags = store.selectedFinderTags
+        let pinnedMacroButtons = Array(store.pinnedMacroButtons.prefix(style.pinnedMacroButtonLimit))
+        let liveBuffer = store.buffers.first(where: { $0.id == buffer.id }) ?? buffer
+        let largeFileEditingCapability = store.largeFileEditingCapability(for: liveBuffer)
+        let canOpenVisibleLargeFileChunk = store.selectedLargeFileCanOpenVisibleChunkForEditing
+
+        return HStack(spacing: style.spacing) {
             Menu {
                 ForEach(EditorLanguage.allCases) { language in
                     Button(language.displayName) {
@@ -719,6 +782,17 @@ private struct StatusBarView: View {
                 store.toggleWrapLines()
             }
 
+            StatusIconButton(
+                systemName: "arrow.down.right.and.arrow.up.left",
+                isActive: store.hasStructuredFolds(for: buffer),
+                isEnabled: store.selectedBufferSupportsStructuredFolding && !store.isWysiwygModeEnabled,
+                help: store.hasStructuredFolds(for: buffer)
+                    ? "Structured folding active"
+                    : "Toggle structured fold"
+            ) {
+                store.toggleStructuredFoldAtSelection()
+            }
+
             if buffer.language.isMarkdown {
                 HStack(spacing: 2) {
                     StatusIconButton(
@@ -731,16 +805,18 @@ private struct StatusBarView: View {
 
                     StatusIconButton(
                         systemName: "rectangle.split.2x1",
-                        isActive: store.isPreviewVisible,
-                        help: "Source with rendered preview"
+                        isActive: store.isPreviewVisible && !buffer.isLargeFileMode,
+                        isEnabled: !buffer.isLargeFileMode,
+                        help: buffer.isLargeFileMode ? "Preview is disabled in large-file mode" : "Source with rendered preview"
                     ) {
                         store.showMarkdownPreviewMode()
                     }
 
                     StatusIconButton(
                         systemName: "doc.richtext",
-                        isActive: store.isWysiwygModeEnabled,
-                        help: "WYSIWYG Markdown mode"
+                        isActive: store.isWysiwygModeEnabled && !buffer.isLargeFileMode,
+                        isEnabled: !buffer.isLargeFileMode,
+                        help: buffer.isLargeFileMode ? "WYSIWYG is disabled in large-file mode" : "WYSIWYG Markdown mode"
                     ) {
                         store.showMarkdownWysiwygMode()
                     }
@@ -753,22 +829,42 @@ private struct StatusBarView: View {
                 ) {
                     store.toggleMarkdownOutline()
                 }
+            } else if buffer.language.isDelimitedTable {
+                HStack(spacing: 2) {
+                    StatusIconButton(
+                        systemName: "chevron.left.forwardslash.chevron.right",
+                        isActive: !store.isPreviewVisible,
+                        help: "Source mode"
+                    ) {
+                        store.showSourceMode()
+                    }
+
+                    StatusIconButton(
+                        systemName: "tablecells",
+                        isActive: store.isPreviewVisible,
+                        help: buffer.isLargeFileMode ? "Table preview for current large-file chunk" : "Table preview"
+                    ) {
+                        store.showDelimitedTablePreviewMode()
+                    }
+                }
             }
 
             StatusIconButton(
                 systemName: "scope",
-                isActive: store.isFocusModeEnabled,
-                isEnabled: !store.isWysiwygModeEnabled,
-                help: "Focus mode"
+                isActive: store.isFocusModeEnabled && !buffer.isLargeFileMode,
+                isEnabled: !store.isWysiwygModeEnabled && !buffer.isLargeFileMode,
+                help: buffer.isLargeFileMode ? "Focus mode is disabled in large-file mode" : "Focus mode"
             ) {
                 store.toggleFocusMode()
             }
 
             StatusIconButton(
                 systemName: "map",
-                isActive: store.isMiniMapVisible,
-                isEnabled: !store.isWysiwygModeEnabled,
-                help: store.isWysiwygModeEnabled ? "Minimap is available in source mode" : "Minimap (⌘⌥4)"
+                isActive: store.isMiniMapVisible && !buffer.isLargeFileMode,
+                isEnabled: !store.isWysiwygModeEnabled && !buffer.isLargeFileMode,
+                help: buffer.isLargeFileMode
+                    ? "Minimap is disabled in large-file mode"
+                    : (store.isWysiwygModeEnabled ? "Minimap is available in source mode" : "Minimap (⌘⌥4)")
             ) {
                 store.toggleMiniMap()
             }
@@ -782,11 +878,76 @@ private struct StatusBarView: View {
             }
 
             StatusIconButton(
+                systemName: "terminal",
+                isActive: store.isTerminalPanelVisible,
+                help: "Terminal"
+            ) {
+                store.toggleTerminalPanel()
+            }
+
+            StatusIconButton(
                 systemName: "text.bubble",
                 isActive: store.isCommentsPanelVisible,
                 help: "Comments"
             ) {
                 store.toggleCommentsPanel()
+            }
+
+            StatusIconButton(
+                systemName: "eye",
+                isActive: store.isCompanionPanelVisible,
+                help: "Companion"
+            ) {
+                store.toggleCompanionPanel()
+            }
+
+            StatusIconButton(
+                systemName: "checklist",
+                isActive: store.isTasksPanelVisible,
+                help: "Tasks"
+            ) {
+                store.toggleTasksPanel()
+            }
+
+            StatusIconButton(
+                systemName: "point.3.connected.trianglepath.dotted",
+                isActive: store.isPOModePanelVisible,
+                help: "PO mode"
+            ) {
+                store.togglePOModePanel()
+            }
+
+            StatusIconButton(
+                systemName: store.isVoiceScribeRunning ? "waveform.circle.fill" : "waveform.circle",
+                isActive: store.isScribePanelVisible || store.isVoiceScribeRunning,
+                help: "Scribe"
+            ) {
+                store.toggleScribePanel()
+            }
+
+            StatusIconButton(
+                systemName: "text.badge.plus",
+                isActive: store.isMacrosPanelVisible,
+                help: "Macros"
+            ) {
+                store.toggleMacrosPanel()
+            }
+
+            ForEach(pinnedMacroButtons) { button in
+                StatusMacroButton(
+                    button: button,
+                    showsTitle: style.showsPinnedMacroTitles
+                ) {
+                    store.applyPinnedMacro(button.reference)
+                }
+            }
+
+            StatusIconButton(
+                systemName: "chart.bar.xaxis",
+                isActive: store.isStatsPanelVisible,
+                help: "Usage stats"
+            ) {
+                store.toggleStatsPanel()
             }
 
             StatusIconButton(
@@ -808,7 +969,159 @@ private struct StatusBarView: View {
                     .layoutPriority(-1)
             }
 
-            if style.showsStats {
+            if buffer.savePolicy != .normal {
+                HStack(spacing: 4) {
+                    Image(systemName: buffer.savePolicy.systemImage)
+                    Text(buffer.savePolicy.displayName)
+                }
+                .foregroundStyle(.secondary)
+                .fixedSize()
+                .help(buffer.savePolicy.blockedSaveMessage(for: buffer.displayTitle))
+            }
+
+            if store.selectedBufferCanSaveLargeFileChunkBack {
+                StatusIconButton(
+                    systemName: "square.and.arrow.down",
+                    isActive: false,
+                    help: "Save this edited chunk back to its source large file"
+                ) {
+                    store.saveSelectedLargeFileChunkBackToSource()
+                }
+            }
+
+            if buffer.isEncrypted {
+                HStack(spacing: 4) {
+                    Image(systemName: "lock.shield")
+                    Text("Encrypted")
+                }
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .help("This file is saved as a password-protected SimpleLime encrypted document.")
+            }
+
+            if buffer.isLargeFileMode {
+                if style.showsLargeFileControls {
+                    HStack(spacing: 1) {
+                        StatusIconButton(
+                            systemName: "backward.end",
+                            isActive: false,
+                            isEnabled: store.selectedLargeFileCanPageBackward,
+                            help: "Show first large-file chunk"
+                        ) {
+                            store.showLargeFileFirstChunk()
+                        }
+
+                        StatusIconButton(
+                            systemName: "chevron.left",
+                            isActive: false,
+                            isEnabled: store.selectedLargeFileCanPageBackward,
+                            help: "Show previous large-file chunk"
+                        ) {
+                            store.showLargeFilePreviousChunk()
+                        }
+
+                        StatusIconButton(
+                            systemName: "chevron.right",
+                            isActive: false,
+                            isEnabled: store.selectedLargeFileCanPageForward,
+                            help: "Show next large-file chunk"
+                        ) {
+                            store.showLargeFileNextChunk()
+                        }
+
+                        StatusIconButton(
+                            systemName: "forward.end",
+                            isActive: false,
+                            isEnabled: store.selectedLargeFileCanPageForward,
+                            help: "Show last large-file chunk"
+                        ) {
+                            store.showLargeFileLastChunk()
+                        }
+
+                        StatusIconButton(
+                            systemName: "number",
+                            isActive: false,
+                            help: "Jump to a line in the full large file"
+                        ) {
+                            store.jumpSelectedLargeFileToLineWithPrompt()
+                        }
+
+                        StatusIconButton(
+                            systemName: "magnifyingglass",
+                            isActive: false,
+                            help: "Search the full large file"
+                        ) {
+                            store.searchSelectedLargeFileWithPrompt()
+                        }
+
+                        StatusIconButton(
+                            systemName: "pencil.line",
+                            isActive: largeFileEditingCapability.canEditLoadedText,
+                            isEnabled: largeFileEditingCapability.canEnableInPlaceChunkEditing || canOpenVisibleLargeFileChunk,
+                            help: canOpenVisibleLargeFileChunk
+                                ? "Edit the chunk containing the first visible large-file line"
+                                : largeFileEditingCapability.canEnableInPlaceChunkEditing
+                                    ? "Edit the current loaded chunk in place"
+                                    : largeFileEditingCapability.editUnavailableMessage
+                        ) {
+                            if canOpenVisibleLargeFileChunk {
+                                store.editSelectedLargeFileChunk(containingVisibleLineRange: visibleLineRange)
+                            } else {
+                                store.enableSelectedLargeFileChunkEditing()
+                            }
+                        }
+
+                        StatusIconButton(
+                            systemName: "doc.on.doc",
+                            isActive: false,
+                            isEnabled: largeFileEditingCapability.canEnableInPlaceChunkEditing || canOpenVisibleLargeFileChunk,
+                            help: canOpenVisibleLargeFileChunk
+                                ? "Open the chunk containing the first visible large-file line as editable scratch"
+                                : "Open current chunk as editable scratch"
+                        ) {
+                            if canOpenVisibleLargeFileChunk {
+                                store.openSelectedLargeFileChunkAsScratch(containingVisibleLineRange: visibleLineRange)
+                            } else {
+                                store.openSelectedLargeFileChunkAsScratch()
+                            }
+                        }
+                    }
+                }
+
+                HStack(spacing: 4) {
+                    Image(systemName: "gauge.with.dots.needle.50percent")
+                    Text(largeFileStatusText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .foregroundStyle(.secondary)
+                .fixedSize()
+                .help(largeFileEditingCapability.detail)
+
+                if let searchStatus = store.largeFileSearchStatus, style != .minimal {
+                    Text(searchStatus)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: style.largeFileSearchStatusWidth, alignment: .leading)
+                        .clipped()
+                        .help(searchStatus)
+                }
+            }
+
+            if !finderTags.isEmpty, style.showsPath {
+                HStack(spacing: 4) {
+                    Image(systemName: "tag")
+                    Text(finderTags.joined(separator: ", "))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .frame(maxWidth: style.tagMaxWidth, alignment: .leading)
+                .clipped()
+                .help(finderTags.joined(separator: ", "))
+            }
+
+            if style.showsStats, !buffer.isLargeFileMode {
                 Text("\(stats.characters) chars")
                     .fixedSize()
                 Text("\(stats.words) words")
@@ -837,6 +1150,26 @@ private struct StatusBarView: View {
                     .fixedSize()
             }
         }
+    }
+
+    private var largeFileStatusText: String {
+        let liveBuffer = store.buffers.first(where: { $0.id == buffer.id }) ?? buffer
+        let editingCapability = store.largeFileEditingCapability(for: liveBuffer)
+        guard let fileSizeBytes = liveBuffer.fileSizeBytes else {
+            return editingCapability.status
+        }
+
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        let total = formatter.string(fromByteCount: fileSizeBytes)
+        let start = liveBuffer.largeFilePreviewStartOffsetBytes ?? 0
+        let count = Int64(liveBuffer.largeFilePreviewByteCount ?? EditorStore.largeFilePreviewByteLimit(for: liveBuffer.language))
+        let end = min(fileSizeBytes, start + count)
+        guard fileSizeBytes > 0 else {
+            return "\(editingCapability.status), \(total)"
+        }
+
+        return "\(editingCapability.status), virtual \(total), chunk \(formatter.string(fromByteCount: start))-\(formatter.string(fromByteCount: end))"
     }
 }
 
@@ -887,12 +1220,40 @@ enum StatusBarDensity {
         self == .regular ? 340 : 150
     }
 
+    var tagMaxWidth: CGFloat {
+        self == .regular ? 180 : 90
+    }
+
     var showsStats: Bool {
         self == .regular
     }
 
     var showsSaveText: Bool {
         self != .minimal
+    }
+
+    var showsLargeFileControls: Bool {
+        self != .minimal
+    }
+
+    var largeFileSearchStatusWidth: CGFloat {
+        switch self {
+        case .regular: 220
+        case .compact: 120
+        case .minimal: 0
+        }
+    }
+
+    var pinnedMacroButtonLimit: Int {
+        switch self {
+        case .regular: 3
+        case .compact: 1
+        case .minimal: 0
+        }
+    }
+
+    var showsPinnedMacroTitles: Bool {
+        self == .regular
     }
 }
 
@@ -931,5 +1292,40 @@ private struct StatusIconButton: View {
         }
 
         return isActive ? .accentColor : Color(nsColor: .secondaryLabelColor)
+    }
+}
+
+private struct StatusMacroButton: View {
+    let button: PinnedMacroButton
+    let showsTitle: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: button.systemName)
+                    .font(.system(size: 11, weight: .semibold))
+                if showsTitle {
+                    Text(button.title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+            .frame(width: showsTitle ? 86 : 22, height: 20)
+            .contentShape(RoundedRectangle(cornerRadius: 5))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color.accentColor)
+        .background {
+            RoundedRectangle(cornerRadius: 5)
+                .fill(Color.accentColor.opacity(0.12))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 5)
+                .stroke(Color.accentColor.opacity(0.30), lineWidth: 1)
+        }
+        .help(button.help)
+        .fixedSize()
     }
 }

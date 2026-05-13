@@ -6,10 +6,12 @@ struct ContentView: View {
     @ObservedObject private var network: NetworkShareService
     @StateObject private var chromeState = WindowChromeState()
     @State private var keyMonitor: Any?
+    private weak var workspace: WorkspaceStore?
     private let onActivate: () -> Void
 
-    init(store: EditorStore, onActivate: @escaping () -> Void = {}) {
+    init(store: EditorStore, workspace: WorkspaceStore? = nil, onActivate: @escaping () -> Void = {}) {
         self.store = store
+        self.workspace = workspace
         self.onActivate = onActivate
         _network = ObservedObject(wrappedValue: store.networkShare)
     }
@@ -28,8 +30,13 @@ struct ContentView: View {
                 }
 
                 if let buffer = store.selectedBuffer {
-                    workspace(buffer: buffer)
-                        .zIndex(0)
+                    if store.shouldSuspendEditorRenderingForPendingClose(buffer) {
+                        PendingCloseBackdrop()
+                            .zIndex(0)
+                    } else {
+                        workspace(buffer: buffer)
+                            .zIndex(0)
+                    }
                 } else {
                     VStack(spacing: 10) {
                         Image(systemName: "doc.text")
@@ -44,7 +51,7 @@ struct ContentView: View {
             }
 
             if store.isCommandPaletteVisible {
-                CommandPaletteOverlay(store: store)
+                CommandPaletteOverlay(store: store, workspace: workspace)
                     .zIndex(100)
             }
         }
@@ -93,7 +100,7 @@ struct ContentView: View {
                 store.confirmPendingClose()
             }
         } message: {
-            Text("“\(store.pendingCloseBuffer?.displayTitle ?? "Untitled")” contains text. Closing it removes this tab from the restored session.")
+            Text("“\(store.pendingCloseBuffer?.displayTitle ?? "Untitled")” has unsaved editor state. Closing it removes this tab from the restored session.")
         }
         .alert(
             "Trust Device?",
@@ -124,34 +131,83 @@ struct ContentView: View {
 
     @ViewBuilder
     private func workspace(buffer: EditorBuffer) -> some View {
-        if store.isDocumentCatalogVisible {
+        if hasLeftSidebar(for: buffer) || hasRightSidebar {
             HSplitView {
-                DocumentCatalogView(store: store)
-                    .frame(minWidth: 190, idealWidth: 250, maxWidth: 360)
-                workspacePanels(buffer: buffer)
-                    .frame(minWidth: 260)
-            }
-            .clipped()
-        } else {
-            workspacePanels(buffer: buffer)
-        }
-    }
+                if hasLeftSidebar(for: buffer) {
+                    leftSidebar(buffer: buffer)
+                }
 
-    @ViewBuilder
-    private func workspacePanels(buffer: EditorBuffer) -> some View {
-        if store.isNetworkPanelVisible {
-            HSplitView {
                 EditorWorkspaceView(store: store, buffer: buffer)
                     .id(buffer.id)
                     .clipped()
-                    .frame(minWidth: 220)
-                NetworkSharePanelView(store: store)
+                    .frame(minWidth: 260)
+
+                if hasRightSidebar {
+                    rightSidebar(buffer: buffer)
+                }
             }
             .clipped()
         } else {
             EditorWorkspaceView(store: store, buffer: buffer)
                 .id(buffer.id)
                 .clipped()
+        }
+    }
+
+    private func hasLeftSidebar(for buffer: EditorBuffer) -> Bool {
+        store.isDocumentCatalogVisible || (store.isOutlineVisible && buffer.language.isMarkdown)
+    }
+
+    private var hasRightSidebar: Bool {
+        store.isAIPanelVisible ||
+            store.isNetworkPanelVisible ||
+            store.isCommentsPanelVisible ||
+            store.isCompanionPanelVisible ||
+            store.isTasksPanelVisible ||
+            store.isPOModePanelVisible ||
+            store.isScribePanelVisible ||
+            store.isStatsPanelVisible ||
+            store.isMacrosPanelVisible
+    }
+
+    @ViewBuilder
+    private func leftSidebar(buffer: EditorBuffer) -> some View {
+        if store.isDocumentCatalogVisible {
+            DocumentCatalogView(store: store)
+                .frame(minWidth: 190, idealWidth: 250, maxWidth: 360)
+        } else if store.isOutlineVisible, buffer.language.isMarkdown {
+            MarkdownOutlineView(
+                text: buffer.text,
+                selectionRanges: buffer.selectionRanges,
+                onSelect: { heading in
+                    store.jumpToHeading(heading)
+                }
+            )
+            .frame(minWidth: 170, idealWidth: 220, maxWidth: 320)
+        }
+    }
+
+    @ViewBuilder
+    private func rightSidebar(buffer: EditorBuffer) -> some View {
+        if store.isAIPanelVisible {
+            AIChatPanelView(store: store, buffer: buffer)
+        } else if store.isCompanionPanelVisible {
+            CompanionPanelView(store: store, buffer: buffer)
+        } else if store.isNetworkPanelVisible {
+            NetworkSharePanelView(store: store)
+        } else if store.isCommentsPanelVisible {
+            CommentsPanelView(store: store, buffer: buffer)
+                .frame(minWidth: 240, idealWidth: 300, maxWidth: 420)
+        } else if store.isTasksPanelVisible {
+            TaskBoardPanelView(store: store)
+        } else if store.isPOModePanelVisible {
+            POModePanelView(store: store)
+        } else if store.isScribePanelVisible {
+            VoiceScribePanelView(store: store)
+        } else if store.isStatsPanelVisible {
+            UsageStatsPanelView(store: store)
+        } else if store.isMacrosPanelVisible {
+            TextMacroPanelView(store: store)
         }
     }
 
@@ -235,6 +291,12 @@ struct ContentView: View {
             return nil
         case 17 where flags.contains(.option) && !flags.contains(.shift):
             store.toggleTypewriterMode()
+            return nil
+        case 17 where flags.contains(.shift) && !flags.contains(.option):
+            store.toggleTasksPanel()
+            return nil
+        case 38 where flags.contains(.shift):
+            store.toggleTerminalPanel()
             return nil
         case 34 where flags.contains(.shift):
             store.toggleAIPanel()
@@ -339,8 +401,16 @@ struct ContentView: View {
     }
 }
 
+private struct PendingCloseBackdrop: View {
+    var body: some View {
+        Color(nsColor: .textBackgroundColor)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 private struct CommandPaletteOverlay: View {
     @ObservedObject var store: EditorStore
+    weak var workspace: WorkspaceStore?
     @StateObject private var query = CommandPaletteQuery()
     @State private var selectedIndex = 0
 
@@ -383,9 +453,65 @@ private struct CommandPaletteOverlay: View {
     private var paletteCommands: [PaletteCommand] {
         var commands: [PaletteCommand] = [
             PaletteCommand("New Scratch Buffer", shortcut: "⌘N", keywords: "file tab scratch") { store.newScratch() },
+            PaletteCommand("New Drawing Board", shortcut: nil, keywords: "drawing whiteboard canvas sketch miro") { store.newDrawingBoard() },
             PaletteCommand("Open File", shortcut: "⌘O", keywords: "file") { store.openFiles() },
+            PaletteCommand("Open Encrypted File", shortcut: nil, keywords: "file encrypted secure password touch id") { store.openEncryptedFileWithPrompt() },
             PaletteCommand("Open Folder", shortcut: "⇧⌘O", keywords: "folder project catalog documents sidebar sublime") { store.openFolder() },
             PaletteCommand("Save", shortcut: "⌘S", keywords: "file") { store.saveSelected() },
+            PaletteCommand("Save Chunk Back to Source", shortcut: nil, keywords: "large file chunk save back source") {
+                store.saveSelectedLargeFileChunkBackToSource()
+            },
+            PaletteCommand("Edit Large-File Chunk", shortcut: nil, keywords: "large file chunk edit in place") {
+                store.enableSelectedLargeFileChunkEditing()
+            },
+            PaletteCommand("Replace Large-File Line", shortcut: nil, keywords: "large file virtual line replace rewrite source") {
+                store.replaceSelectedLargeFileLineWithPrompt()
+            },
+            PaletteCommand("Insert Large-File Line", shortcut: nil, keywords: "large file virtual line insert source") {
+                store.insertSelectedLargeFileLineWithPrompt()
+            },
+            PaletteCommand("Delete Large-File Line", shortcut: nil, keywords: "large file virtual line delete source") {
+                store.deleteSelectedLargeFileLineWithPrompt()
+            },
+            PaletteCommand("Replace Large-File Lines", shortcut: nil, keywords: "large file virtual range block replace rewrite source") {
+                store.replaceSelectedLargeFileLinesWithPrompt()
+            },
+            PaletteCommand("Insert Large-File Lines", shortcut: nil, keywords: "large file virtual range block insert source") {
+                store.insertSelectedLargeFileLinesWithPrompt()
+            },
+            PaletteCommand("Delete Large-File Lines", shortcut: nil, keywords: "large file virtual range block delete source") {
+                store.deleteSelectedLargeFileLinesWithPrompt()
+            },
+            PaletteCommand("Save Numbered Version", shortcut: nil, keywords: "file backup version copy") { store.saveVersionedCopyOfSelected() },
+            PaletteCommand("Save With Numbered Backup", shortcut: nil, keywords: "file backup version before overwrite") { store.saveSelectedWithNumberedBackup() },
+            PaletteCommand("Save Encrypted Copy", shortcut: nil, keywords: "file encrypted secure password touch id") { store.saveSelectedEncryptedWithPrompt() },
+            PaletteCommand("Force Close Buffer", shortcut: nil, keywords: "close discard stuck tab modal") { store.forceCloseSelected() },
+            PaletteCommand("Export HTML", shortcut: nil, keywords: "export html markdown file") { store.exportSelectedAsHTML() },
+            PaletteCommand("Export PDF", shortcut: nil, keywords: "export pdf print file") { store.exportSelectedAsPDF() },
+            PaletteCommand("Export Word", shortcut: nil, keywords: "export word doc file") { store.exportSelectedAsWord() },
+            PaletteCommand("Export Drawing as SVG", shortcut: nil, keywords: "drawing whiteboard export svg vector image") { store.exportSelectedDrawingAsSVG() },
+            PaletteCommand("Export Drawing as PNG", shortcut: nil, keywords: "drawing whiteboard export png image") { store.exportSelectedDrawingAsPNG() },
+            PaletteCommand("Copy Drawing as PNG", shortcut: nil, keywords: "drawing whiteboard copy clipboard png image paste") { store.copySelectedDrawingAsPNG() },
+            PaletteCommand("Insert Drawing Widget", shortcut: nil, keywords: "drawing whiteboard markdown widget sldraw image") { store.insertDrawingWidgetIntoMarkdown() },
+            PaletteCommand("Export CSV/TSV as Excel", shortcut: nil, keywords: "export excel xls csv tsv spreadsheet") { store.exportSelectedDelimitedTableAsExcel() },
+            PaletteCommand("Compare With Previous Tab", shortcut: nil, keywords: "diff compare file tab") { store.compareSelectedBufferWithPreviousTab() },
+            PaletteCommand("Compare With File", shortcut: nil, keywords: "diff compare file choose") { store.compareSelectedBufferWithFile() },
+            PaletteCommand("Commit Current File", shortcut: nil, keywords: "git commit file version control") { store.commitSelectedFileWithPrompt() },
+            PaletteCommand("Add Finder Tag", shortcut: nil, keywords: "finder tag label file") { store.addFinderTagToSelectedFileWithPrompt() },
+            PaletteCommand("Clear Finder Tags", shortcut: nil, keywords: "finder tag label file") { store.clearFinderTagsForSelectedFile() },
+            PaletteCommand(
+                store.selectedSavePolicy == .readOnly ? "Disable Read-Only Mode" : "Enable Read-Only Mode",
+                shortcut: nil,
+                keywords: "readonly read-only protect save guard"
+            ) { store.toggleReadOnlyMode() },
+            PaletteCommand(
+                store.selectedSavePolicy == .temporary ? "Disable Temporary Mode" : "Enable Temporary Mode",
+                shortcut: nil,
+                keywords: "temporary temp protect save guard"
+            ) { store.toggleTemporaryMode() },
+            PaletteCommand("Allow Saving", shortcut: nil, keywords: "save guard normal readonly temporary") {
+                store.setSelectedSavePolicy(.normal)
+            },
             PaletteCommand("Find", shortcut: "⌘F", keywords: "search") { store.showFind() },
             PaletteCommand("Find and Replace", shortcut: "⌘R", keywords: "search replace") { store.showReplace() },
             PaletteCommand("Find in Files", shortcut: "⇧⌘F", keywords: "global search folder tabs files") { store.showGlobalFind() },
@@ -394,6 +520,9 @@ private struct CommandPaletteOverlay: View {
             PaletteCommand("Select All Matches", shortcut: "⌥⌘L", keywords: "cursor selection sublime") { store.selectAllMatches() },
             PaletteCommand("Split Selection Into Lines", shortcut: "⇧⌘L", keywords: "cursor line sublime") { store.performEditorCommand(.splitSelectionIntoLines) },
             PaletteCommand("Expand Selection to Line", shortcut: "⌘L", keywords: "selection line sublime") { store.performEditorCommand(.expandSelectionToLine) },
+            PaletteCommand("Toggle Fold", shortcut: nil, keywords: "fold collapse expand json yaml outline heading") { store.toggleStructuredFoldAtSelection() },
+            PaletteCommand("Unfold All", shortcut: nil, keywords: "fold collapse expand json yaml outline heading") { store.unfoldAllStructuredBlocks() },
+            PaletteCommand("Create Editor Diagnostics", shortcut: nil, keywords: "editor diagnostics performance latency large file syntax") { store.createEditorDiagnosticsScratch() },
             PaletteCommand("Toggle Word Wrap", shortcut: "⌥⌘Z", keywords: "editor wrap") { store.toggleWrapLines() },
             PaletteCommand("Markdown Source Mode", shortcut: "⌥⌘1", keywords: "source markdown editor raw") { store.showSourceMode() },
             PaletteCommand("Markdown Preview Split", shortcut: "⌥⌘2", keywords: "typora preview markdown split") { store.showMarkdownPreviewMode() },
@@ -403,10 +532,51 @@ private struct CommandPaletteOverlay: View {
             PaletteCommand("Toggle Documents Sidebar", shortcut: "⌥⌘D", keywords: "folder project catalog documents sidebar sublime") { store.toggleDocumentCatalog() },
             PaletteCommand("Add Comment", shortcut: "⌥⌘C", keywords: "comment annotation note review google docs") { store.addCommentToSelection() },
             PaletteCommand("Toggle Comments", shortcut: nil, keywords: "comment annotation note review google docs") { store.toggleCommentsPanel() },
+            PaletteCommand("Toggle Tasks", shortcut: "⇧⌘T", keywords: "task kanban board todo checklist") { store.toggleTasksPanel() },
+            PaletteCommand("New Task", shortcut: nil, keywords: "task kanban board todo") { store.addManualTaskWithPrompt() },
+            PaletteCommand("Generate PO Mode Brief", shortcut: nil, keywords: "po mode product owner mindmap mind map docs gaps kanban analysis") { store.generatePOModeBriefForDocumentCatalog() },
+            PaletteCommand("Add PO Gaps as Tasks", shortcut: nil, keywords: "po mode product owner gaps kanban tasks todo") { store.addPOModeGapsAsTasks() },
+            PaletteCommand("Open PO Mode Panel", shortcut: nil, keywords: "po mode product owner mindmap mind map docs gaps kanban analysis drilldown") { store.refreshPOModeAnalysisForDocumentCatalog() },
+            PaletteCommand("Toggle Scribe", shortcut: nil, keywords: "scribe voice microphone transcript dictation meeting") { store.toggleScribePanel() },
+            PaletteCommand("Start Voice Scribe", shortcut: nil, keywords: "scribe voice microphone transcript dictation meeting") { store.startVoiceScribe() },
+            PaletteCommand("Stop Voice Scribe", shortcut: nil, keywords: "scribe voice microphone transcript dictation meeting") { store.stopVoiceScribe() },
+            PaletteCommand("Toggle Stats", shortcut: nil, keywords: "stats analytics editing timelog activity") { store.toggleStatsPanel() },
+            PaletteCommand(
+                store.isUsageActivityWatchEnabled ? "Stop Activity Watch" : "Start Activity Watch",
+                shortcut: nil,
+                keywords: "stats analytics timelog activity app window watch"
+            ) { store.toggleUsageActivityWatch() },
+            PaletteCommand("Create Today's Timelog", shortcut: nil, keywords: "stats analytics editing timelog activity report") { store.createTodayTimelogScratch() },
+            PaletteCommand("Toggle Macros", shortcut: nil, keywords: "macro template snippet automation") { store.toggleMacrosPanel() },
+            PaletteCommand("Create Macro From Selection", shortcut: nil, keywords: "macro template snippet selection") { store.createTextMacroFromSelectionWithPrompt() },
+            PaletteCommand("Toggle Terminal", shortcut: "⇧⌘J", keywords: "terminal shell command zsh bottom panel") { store.toggleTerminalPanel() },
+            PaletteCommand("Restart Terminal", shortcut: nil, keywords: "terminal shell command zsh pty broken reset restart") {
+                if let id = store.selectedTerminalSessionID {
+                    store.restartTerminalSession(id)
+                }
+            },
+            PaletteCommand("Insert PRD Template", shortcut: nil, keywords: "macro template prd product requirements") {
+                if let macro = TextMacro.builtIns.first(where: { $0.id == "built-in:prd" }) {
+                    store.applyTextMacro(macro)
+                }
+            },
+            PaletteCommand("Insert 1x1 Template", shortcut: nil, keywords: "macro template one on one meeting") {
+                if let macro = TextMacro.builtIns.first(where: { $0.id == "built-in:1x1" }) {
+                    store.applyTextMacro(macro)
+                }
+            },
             PaletteCommand("Toggle Minimap", shortcut: "⌥⌘4", keywords: "sublime minimap overview") { store.toggleMiniMap() },
             PaletteCommand("Toggle Focus Mode", shortcut: "⌥⌘F", keywords: "focus writing") { store.toggleFocusMode() },
             PaletteCommand("Toggle Typewriter Mode", shortcut: "⌥⌘T", keywords: "typewriter writing") { store.toggleTypewriterMode() },
             PaletteCommand("Toggle AI Panel", shortcut: "⇧⌘I", keywords: "agent chat") { store.toggleAIPanel() },
+            PaletteCommand("Toggle Companion", shortcut: nil, keywords: "ai companion suggestion review apply comment") { store.toggleCompanionPanel() },
+            PaletteCommand(
+                store.isCompanionAutoScanEnabled ? "Disable Live Companion" : "Enable Live Companion",
+                shortcut: nil,
+                keywords: "ai companion live realtime watch autoscan suggestion"
+            ) { store.toggleCompanionAutoScan() },
+            PaletteCommand("Run Companion Scan", shortcut: nil, keywords: "ai companion suggestion review apply comment") { store.runCompanionScan() },
+            PaletteCommand("Translate Selection", shortcut: nil, keywords: "ai translation translate language local llm") { store.translateSelectionWithPrompt() },
             PaletteCommand("Uppercase", shortcut: "⇧⌘U", keywords: "text transform") { store.performTextTransform(.uppercase) },
             PaletteCommand("Lowercase", shortcut: "⌥⌘U", keywords: "text transform") { store.performTextTransform(.lowercase) },
             PaletteCommand("Title Case", shortcut: "⌥⇧⌘T", keywords: "text transform") { store.performTextTransform(.titlecase) },
@@ -417,6 +587,9 @@ private struct CommandPaletteOverlay: View {
             PaletteCommand("Trim Trailing Whitespace", shortcut: "⌥⌘W", keywords: "text transform") { store.performTextTransform(.trimTrailingWhitespace) },
             PaletteCommand("Duplicate Line", shortcut: "⇧⌘D", keywords: "line sublime") { store.performTextTransform(.duplicateLine) },
             PaletteCommand("Join Lines", shortcut: "⌘J", keywords: "line sublime") { store.performTextTransform(.joinLines) },
+            PaletteCommand("Format JSON", shortcut: nil, keywords: "json format pretty transform") { store.performTextTransform(.formatJSON) },
+            PaletteCommand("Minify JSON", shortcut: nil, keywords: "json minify compact transform") { store.performTextTransform(.minifyJSON) },
+            PaletteCommand("Format Markdown Tables", shortcut: nil, keywords: "markdown table format align transform") { store.performTextTransform(.formatMarkdownTables) },
             PaletteCommand("Move Line Up", shortcut: "⌥⌘↑", keywords: "line sublime") { store.performEditorCommand(.moveLineUp) },
             PaletteCommand("Move Line Down", shortcut: "⌥⌘↓", keywords: "line sublime") { store.performEditorCommand(.moveLineDown) },
             PaletteCommand("Delete Line", shortcut: nil, keywords: "line sublime") { store.performEditorCommand(.deleteLine) },
@@ -444,6 +617,37 @@ private struct CommandPaletteOverlay: View {
             PaletteCommand("Math Block", shortcut: nil, keywords: "markdown typora insert latex katex") { store.performMarkdownCommand(.mathBlock) },
             PaletteCommand("Mermaid Diagram", shortcut: nil, keywords: "markdown typora insert mermaid diagram") { store.performMarkdownCommand(.mermaidDiagram) }
         ]
+
+        if let workspace {
+            commands.insert(
+                PaletteCommand("New Workspace", shortcut: nil, keywords: "workspace work personal hobby context") {
+                    workspace.createWorkspaceWithPrompt()
+                },
+                at: min(1, commands.count)
+            )
+            commands.insert(
+                PaletteCommand("Rename Workspace", shortcut: nil, keywords: "workspace context") {
+                    workspace.renameActiveWorkspaceWithPrompt()
+                },
+                at: min(2, commands.count)
+            )
+
+            for profile in workspace.workspaceProfiles where profile.id != workspace.activeWorkspaceID {
+                commands.append(
+                    PaletteCommand("Switch Workspace: \(profile.name)", shortcut: nil, keywords: "workspace context") {
+                        workspace.switchWorkspace(profile.id)
+                    }
+                )
+            }
+        }
+
+        if store.selectedBuffer?.language.isDelimitedTable == true {
+            commands.append(
+                PaletteCommand("Table Preview", shortcut: "⌥⌘P", keywords: "csv tsv table preview data spreadsheet") {
+                    store.showDelimitedTablePreviewMode()
+                }
+            )
+        }
 
         if !(store.selectedBuffer?.language.isMarkdown ?? false) {
             commands.removeAll { $0.keywords.contains("markdown") || $0.keywords.contains("typora") }
